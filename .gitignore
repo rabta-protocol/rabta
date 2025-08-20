@@ -1,0 +1,21 @@
+# Rust build output
+/target/
+
+# Local relay data (`DATA_DIR=./data` in the quick start): SQLite DB, blobs, tmp
+/data/
+
+# SQLite database and WAL sidecars, in case DATA_DIR points at the tree root
+/index.db
+/index.db-wal
+/index.db-shm
+
+# Local environment overrides
+.env
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

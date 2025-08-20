@@ -1,0 +1,491 @@
+
+
+
+
+
+
+
+
+
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rabta</title>
+<style>
+  :root {
+    --ink: #000;
+    --mid: #6b6b6b;
+    --soft: #c8c8c8;
+    --rule: #e2e2e2;
+    --paper: #fff;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { background: var(--paper); }
+  body {
+    min-height: 100vh;
+    background: var(--paper);
+    color: var(--ink);
+    font: 16px/1.4 var(--sans);
+    -webkit-font-smoothing: antialiased;
+    padding: 2.5rem 1.25rem;
+    display: grid;
+    place-items: center;
+  }
+  .page { width: 100%; max-width: 880px; }
+  .num { font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+  a { color: inherit; text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+  a:hover { text-decoration-thickness: 2px; }
+  a:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+  [hidden] { display: none !important; }
+
+  /* header */
+  header { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+  .brand { font-size: 1.5rem; font-weight: 800; letter-spacing: -0.03em; }
+  .links { display: flex; gap: 1.1rem; font-size: 0.95rem; color: var(--mid); }
+  .links a { color: var(--ink); }
+  .node-id { margin-top: 0.6rem; padding: 0.6rem 0; border-top: 1px solid var(--ink); border-bottom: 1px solid var(--rule); display: flex; gap: 1rem; align-items: baseline; font-size: 0.85rem; }
+  .node-id span { color: var(--mid); flex: none; }
+  .node-id code { font: 0.85rem var(--mono); overflow-wrap: anywhere; }
+
+  /* donate footer */
+  .donate { margin-top: 4rem; padding-top: 1.1rem; border-top: 1px solid var(--rule); display: flex; align-items: baseline; justify-content: center; gap: 0.6rem; flex-wrap: wrap; font-size: 0.85rem; color: var(--mid); }
+  .donate code { font: 0.85rem var(--mono); color: var(--ink); overflow-wrap: anywhere; }
+  .donate button { font: inherit; color: var(--ink); background: none; border: 1px solid var(--rule); border-radius: 999px; padding: 0.15rem 0.7rem; cursor: pointer; }
+  .donate button:hover { border-color: var(--ink); }
+  .donate button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+  section { margin-top: 3rem; }
+  h2 { font-size: 0.95rem; font-weight: 700; margin-bottom: 1rem; }
+
+  /* storage */
+  .storage-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+  .storage-used { font-size: clamp(2.8rem, 9vw, 4.5rem); font-weight: 700; line-height: 1; letter-spacing: -0.05em; }
+  .storage-budget { font-size: 1.1rem; color: var(--mid); }
+  .bar { display: flex; height: 36px; margin-top: 1.25rem; border: 1.5px solid var(--ink); background: var(--paper); }
+  .bar > i { display: block; height: 100%; transition: width 0.6s ease; }
+  .c-events { background: var(--ink); }
+  .c-claimed { background: var(--mid); }
+  .c-unclaimed { background: var(--soft); }
+  .bar-scale { display: flex; justify-content: space-between; margin-top: 0.4rem; font-size: 0.8rem; color: var(--mid); }
+
+  dl.legend { margin-top: 1.5rem; border-top: 1px solid var(--ink); }
+  .legend div { display: grid; grid-template-columns: 1fr auto 4.5rem; gap: 1rem; align-items: center; padding: 0.65rem 0; border-bottom: 1px solid var(--rule); }
+  .legend dt { display: flex; align-items: center; gap: 0.7rem; }
+  .sw { width: 12px; height: 12px; border: 1px solid var(--ink); }
+  .legend dd { font-variant-numeric: tabular-nums; text-align: right; }
+  .legend dd.pct { color: var(--mid); }
+
+  /* stats */
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--ink); border-bottom: 1px solid var(--ink); }
+  .stat { padding: 1rem 1rem 1.1rem 0; }
+  .stat + .stat { padding-left: 1.25rem; border-left: 1px solid var(--rule); }
+  .stat span { display: block; font-size: 0.85rem; color: var(--mid); }
+  .stat b { display: block; margin-top: 0.35rem; font-size: clamp(1.8rem, 5vw, 2.6rem); font-weight: 700; line-height: 1.05; letter-spacing: -0.04em; font-variant-numeric: tabular-nums; }
+
+  /* two-column: battery + eviction */
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 3rem; }
+  .pair section { margin-top: 0; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
+  .big { font-size: 2.6rem; font-weight: 700; line-height: 1; letter-spacing: -0.05em; }
+  .tag { font-size: 0.8rem; font-weight: 600; border: 1px solid var(--ink); border-radius: 999px; padding: 1px 10px; white-space: nowrap; }
+  .tag.on { background: var(--ink); color: var(--paper); }
+  .meter { height: 14px; margin-top: 1rem; border: 1.5px solid var(--ink); }
+  .meter > i { display: block; height: 100%; width: 0; background: var(--ink); transition: width 0.6s ease; }
+  .meta { display: flex; justify-content: space-between; gap: 1rem; margin-top: 0.5rem; font-size: 0.85rem; color: var(--mid); font-variant-numeric: tabular-nums; }
+  .kv { margin-top: 1rem; border-top: 1px solid var(--ink); }
+  .kv div { display: flex; justify-content: space-between; gap: 1rem; padding: 0.6rem 0; border-bottom: 1px solid var(--rule); font-variant-numeric: tabular-nums; }
+  .kv dt { color: var(--mid); }
+
+  /* sync nodes */
+  .node { display: grid; grid-template-columns: 10px minmax(0, 1fr) 120px 3.5rem; gap: 1rem; align-items: center; padding: 0.8rem 0; border-bottom: 1px solid var(--rule); }
+  .nodes-list { border-top: 1px solid var(--ink); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--ink); border: 1.5px solid var(--ink); }
+  .dot.bad { background: var(--paper); }
+  .host { font-family: var(--mono); font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .when { display: block; font-size: 0.8rem; color: var(--mid); }
+  .node .meter { margin: 0; height: 10px; }
+  .pc { text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* pulse */
+  @keyframes ring { 0% { transform: scale(0.6); opacity: 0.7; } 70%, 100% { transform: scale(2.4); opacity: 0; } }
+  @keyframes core { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(0.8); opacity: 0.5; } }
+  @keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.72; } }
+  @keyframes tagpulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(0,0,0,0.45); } 70% { box-shadow: 0 0 0 7px rgba(0,0,0,0); } }
+
+  .brand { display: inline-flex; align-items: center; gap: 0.6rem; }
+  .live-dot { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--ink); animation: core 2.4s ease-in-out infinite; }
+  .live-dot::after { content: ""; position: absolute; inset: 0; border: 1.5px solid var(--ink); border-radius: 50%; animation: ring 2.4s cubic-bezier(0.22, 0.61, 0.36, 1) infinite; }
+  .dot { position: relative; }
+  .dot.live::after { content: ""; position: absolute; inset: -1.5px; border: 1.5px solid var(--ink); border-radius: 50%; animation: ring 2.4s cubic-bezier(0.22, 0.61, 0.36, 1) infinite; }
+  #bat-ring { animation: breathe 3s ease-in-out infinite; }
+  #ev-state.on { animation: tagpulse 1.6s ease-out infinite; }
+
+  /* svg graphics */
+  .logo { width: 34px; height: 20px; stroke: var(--ink); stroke-width: 2; fill: var(--paper); }
+  .logo .f { fill: var(--ink); }
+  .logo line { stroke-dasharray: 3 3; animation: flow 1s linear infinite; }
+  .ico { width: 15px; height: 15px; margin-right: 0.5rem; vertical-align: -2px; fill: none; stroke: var(--ink); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1); }
+  .stat:hover .ico { transform: scale(1.3) rotate(-8deg); }
+  .bat { display: flex; align-items: center; gap: 1.25rem; }
+  .bat-info { flex: 1; min-width: 0; }
+  .bat .meta { margin-top: 0.6rem; }
+  .ring { width: 96px; height: 96px; flex: none; overflow: visible; }
+  .ring-bg { fill: none; stroke: var(--rule); stroke-width: 8; }
+  .ring-fg { fill: none; stroke: var(--ink); stroke-width: 8; stroke-dasharray: 263.9; stroke-dashoffset: 263.9; transition: stroke-dashoffset 0.9s cubic-bezier(0.16, 1, 0.3, 1); }
+  .bolt, .blk { fill: var(--ink); }
+  .blk.out { fill: var(--paper); stroke: var(--ink); stroke-width: 3; animation: drift 2.8s ease-in-out infinite; }
+  .bat:hover .bolt { animation: core 0.8s ease-in-out infinite; }
+  .net { margin-bottom: 1rem; }
+  .net svg { display: block; width: 100%; max-height: 170px; overflow: visible; }
+  .net-line { stroke: var(--ink); stroke-width: 1.5; stroke-dasharray: 4 4; animation: flow 1s linear infinite; }
+  .net-line.bad { stroke: var(--soft); animation: none; }
+  .net-peer, .net-core { fill: var(--ink); }
+  .net-peer.bad { fill: var(--paper); stroke: var(--ink); stroke-width: 1.5; }
+  .net-ring { fill: none; stroke: var(--ink); stroke-width: 1.5; transform-box: fill-box; transform-origin: center; animation: ring 2.4s cubic-bezier(0.22, 0.61, 0.36, 1) infinite; }
+  @keyframes flow { to { stroke-dashoffset: -6; } }
+  @keyframes drift { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
+
+  /* hover */
+  a, .stat b, .legend div, .node, .host, .dot, .sw, .tag, .bar > i { transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.25s, box-shadow 0.25s, padding 0.25s; }
+  .links a { position: relative; text-decoration: none; }
+  .links a::after { content: ""; position: absolute; left: 0; right: 0; bottom: -2px; height: 1.5px; background: var(--ink); transform: scaleX(0); transform-origin: left; transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
+  .links a:hover::after, .links a:focus-visible::after { transform: scaleX(1); }
+  .stat:hover b { transform: translateY(-4px); }
+  .legend div:hover { box-shadow: inset 3px 0 0 var(--ink); padding-left: 0.85rem; }
+  .legend div:hover .sw { transform: scale(1.35); }
+  .bar:hover > i { opacity: 0.4; }
+  .bar > i:hover { opacity: 1; }
+  .node:hover { box-shadow: inset 3px 0 0 var(--ink); }
+  .node:hover .host { transform: translateX(6px); }
+  .node:hover .dot { transform: scale(1.3); }
+  .tag:hover { transform: translateY(-1px); }
+  .big:hover { letter-spacing: -0.03em; }
+  .big { transition: letter-spacing 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
+
+  @media (max-width: 720px) {
+    .pair { grid-template-columns: 1fr; gap: 3rem; }
+    .stats { grid-template-columns: 1fr; }
+    .stat, .stat + .stat { padding: 0.9rem 0; border-left: 0; }
+    .stat + .stat { border-top: 1px solid var(--rule); }
+    .node { grid-template-columns: 10px minmax(0, 1fr) 3.5rem; }
+    .node .meter { grid-column: 2 / 4; }
+  }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<main class="page">
+
+  <header>
+    <span class="brand"><svg class="logo" viewBox="0 0 34 20" aria-hidden="true"><line x1="9" y1="10" x2="25" y2="10"/><circle class="f" cx="9" cy="10" r="6"/><circle cx="25" cy="10" r="6"/></svg>Rabta<i class="live-dot" aria-hidden="true"></i></span>
+    <nav class="links" aria-label="Links">
+      <span class="num" id="version">v0.0.1</span>
+      <a id="donate" hidden>Donate</a>
+      <a href="https://github.com/rabta-protocol/rabta" target="_blank" rel="noopener noreferrer">GitHub</a>
+    </nav>
+  </header>
+  <p class="node-id"><span>Node ID</span><code id="node-id">—</code></p>
+
+  <section aria-label="Storage">
+    <h2>Storage</h2>
+    <div class="storage-head">
+      <span class="storage-used num" id="used">—</span>
+      <span class="storage-budget num">of <span id="budget">—</span></span>
+    </div>
+    <div class="bar" role="img" id="bar" aria-label="Storage usage">
+      <i class="c-events" id="bar-events"></i>
+      <i class="c-claimed" id="bar-claimed"></i>
+      <i class="c-unclaimed" id="bar-unclaimed"></i>
+    </div>
+    <div class="bar-scale"><span>0</span><span>Eviction starts when full</span></div>
+    <dl class="legend">
+      <div><dt><i class="sw c-events"></i>Events</dt><dd id="events-bytes">—</dd><dd class="pct" id="events-pct">—</dd></div>
+      <div><dt><i class="sw c-claimed"></i>Claimed blobs</dt><dd id="claimed-bytes">—</dd><dd class="pct" id="claimed-pct">—</dd></div>
+      <div><dt><i class="sw c-unclaimed"></i>Unclaimed blobs</dt><dd id="unclaimed-bytes">—</dd><dd class="pct" id="unclaimed-pct">—</dd></div>
+    </dl>
+  </section>
+
+  <section aria-label="Live stats">
+    <div class="stats">
+      <div class="stat"><span><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h8"/></svg>Live events</span><b id="events">—</b></div>
+      <div class="stat"><span><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5 14 5v6l-6 3.5L2 11V5zM2 5l6 3.5L14 5M8 8.5v6"/></svg>Live blobs</span><b id="blobs">—</b></div>
+      <div class="stat"><span><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6V2h4M14 10v4h-4M2 2l4.5 4.5M14 14l-4.5-4.5"/></svg>Max blob size</span><b id="max-blob">—</b></div>
+    </div>
+  </section>
+
+  <div class="pair" style="margin-top:3rem">
+    <section aria-label="Sync battery">
+      <h2>Sync battery</h2>
+      <div class="bat">
+        <svg class="ring" viewBox="0 0 100 100" role="img" aria-label="Sync battery level">
+          <circle class="ring-bg" cx="50" cy="50" r="42"/>
+          <circle class="ring-fg" id="bat-ring" cx="50" cy="50" r="42" transform="rotate(-90 50 50)"/>
+          <path class="bolt" d="M56 26 38 54h11l-5 20 18-30H51z"/>
+        </svg>
+        <div class="bat-info">
+          <div class="row"><span class="big num" id="bat-pct">—</span><span class="tag" id="bat-mode">—</span></div>
+          <div class="meta"><span id="bat-raw">—</span><span id="bat-regen">—</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section aria-label="Eviction">
+      <h2>Eviction</h2>
+      <div class="bat">
+        <svg class="ring" viewBox="0 0 100 100" aria-hidden="true">
+          <rect class="blk" x="20" y="66" width="60" height="14"/>
+          <rect class="blk" x="20" y="48" width="60" height="14"/>
+          <rect class="blk out" x="20" y="24" width="60" height="14"/>
+        </svg>
+        <div class="bat-info">
+          <div class="row"><span class="big num" id="ev-next">—</span><span class="tag" id="ev-state">idle</span></div>
+          <div class="meta"><span>Next to go</span></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <section id="nodes" aria-label="Sync nodes" hidden>
+    <div class="row"><h2>Sync nodes</h2><span class="num" id="nodes-count" style="font-size:.9rem;color:var(--mid)"></span></div>
+    <div class="net" id="net"></div>
+    <div class="nodes-list" id="node-list"></div>
+  </section>
+
+  <footer class="donate" id="donate-foot" hidden>
+    <span>Donate BTC</span>
+    <code id="donate-addr"></code>
+    <button id="donate-copy" type="button">Copy</button>
+  </footer>
+
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  const fmtBytes = (b) => {
+    if (b == null) return '—';
+    const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0, v = b;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return `${i === 0 ? v : v.toFixed(1)} ${u[i]}`;
+  };
+  const fmtCount = (n) => {
+    if (n == null) return '—';
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e4) return (n / 1e3).toFixed(1) + 'K';
+    return n.toLocaleString('en-US');
+  };
+  const fmtShare = (bytes, total) => {
+    if (!total || !bytes) return '0%';
+    const p = bytes / total * 100;
+    return p < 0.1 ? '<0.1%' : p < 10 ? p.toFixed(1) + '%' : Math.round(p) + '%';
+  };
+  const clamp = (v) => Math.min(100, Math.max(0, v));
+  const num = (n) => Math.round(n).toLocaleString('en-US');
+  const hostOf = (u) => { try { return new URL(u).host; } catch { return u; } };
+  const originOf = (u) => { try { return new URL(u).origin; } catch { return u; } };
+
+  const syncAge = (ts) => {
+    if (!ts) return 'Not synced yet';
+    const s = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+    if (s < 5) return 'Synced just now';
+    if (s < 60) return `Synced ${s}s ago`;
+    if (s < 3600) return `Synced ${Math.floor(s / 60)}m ago`;
+    if (s < 86400) return `Synced ${Math.floor(s / 3600)}h ago`;
+    return `Synced ${Math.floor(s / 86400)}d ago`;
+  };
+
+  /* sync nodes */
+  let syncConfigured = false;
+  let configured = new Set();
+  let lastPeers = [];
+
+  const SVGNS = 'http://www.w3.org/2000/svg';
+  const mk = (tag, attrs, parent) => {
+    const e = document.createElementNS(SVGNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  };
+  const isErr = (p) => p.last_error_at != null && (p.last_success_at == null || p.last_error_at > p.last_success_at);
+  let netKey = '';
+  function renderNet(list) {
+    const shown = list.slice(0, 8);
+    const key = shown.map((p) => p.url + isErr(p)).join('\n');
+    if (key === netKey) return;
+    netKey = key;
+    const svg = document.createElementNS(SVGNS, 'svg');
+    svg.setAttribute('viewBox', '0 0 400 150');
+    svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', 'Sync network');
+    const cx = 200, cy = 75;
+    shown.forEach((p, i) => {
+      const a = (i / shown.length) * Math.PI * 2 - Math.PI / 2;
+      const x = cx + Math.cos(a) * 150, y = cy + Math.sin(a) * 52;
+      const bad = isErr(p) ? ' bad' : '';
+      mk('line', { x1: cx, y1: cy, x2: x, y2: y, class: 'net-line' + bad }, svg);
+      mk('circle', { cx: x, cy: y, r: 6, class: 'net-peer' + bad }, svg);
+    });
+    mk('circle', { cx, cy, r: 12, class: 'net-core' }, svg);
+    mk('circle', { cx, cy, r: 12, class: 'net-ring' }, svg);
+    $('net').replaceChildren(svg);
+  }
+
+  function renderNodes(items) {
+    if (items) lastPeers = items;
+    const section = $('nodes');
+    const list = syncConfigured && configured.size
+      ? lastPeers.filter((p) => configured.has(originOf(p.url)))
+      : (syncConfigured ? lastPeers : []);
+    if (!list.length) { section.hidden = true; return; }
+    section.hidden = false;
+    renderNet(list);
+    $('nodes-count').textContent = `${list.length} ${list.length === 1 ? 'node' : 'nodes'}`;
+
+    const frag = document.createDocumentFragment();
+    for (const p of list) {
+      const b = p.battery;
+      const errored = p.last_error_at != null && (p.last_success_at == null || p.last_error_at > p.last_success_at);
+      const pct = b && b.max > 0 ? clamp(b.remaining / b.max * 100) : null;
+
+      const row = document.createElement('div');
+      row.className = 'node';
+      const title = [hostOf(p.url)];
+      if (b && b.max > 0) title.push(`${num(b.remaining)} / ${num(b.max)}`);
+      if (p.last_error) title.push(`Last error: ${p.last_error}`);
+      row.title = title.join(' · ');
+
+      const dot = document.createElement('span');
+      dot.className = 'dot' + (errored ? ' bad' : ' live');
+
+      const id = document.createElement('div');
+      const host = document.createElement('span');
+      host.className = 'host';
+      host.textContent = hostOf(p.url);
+      const when = document.createElement('span');
+      when.className = 'when';
+      when.textContent = errored ? `${syncAge(p.last_success_at)} · last attempt failed` : syncAge(p.last_success_at);
+      id.append(host, when);
+
+      const meter = document.createElement('div');
+      meter.className = 'meter';
+      const fill = document.createElement('i');
+      fill.style.width = (pct ?? 0) + '%';
+      meter.appendChild(fill);
+
+      const pc = document.createElement('span');
+      pc.className = 'pc';
+      pc.textContent = pct == null ? '—' : Math.round(pct) + '%';
+
+      row.append(dot, id, meter, pc);
+      frag.appendChild(row);
+    }
+    $('node-list').replaceChildren(frag);
+  }
+
+  /* stats */
+  async function update() {
+    try {
+      const res = await fetch('/api/v1/stats', { cache: 'no-store' });
+      if (!res.ok) return;
+      const s = await res.json();
+
+      $('max-blob').textContent = fmtBytes(s.blobs?.max_single_bytes);
+      $('events').textContent = fmtCount(s.events?.live);
+      $('blobs').textContent = fmtCount(s.blobs?.live);
+      if (s.version) $('version').textContent = 'v' + s.version;
+
+      const used = s.storage?.used_bytes ?? 0;
+      const budget = s.storage?.budget_bytes ?? 0;
+      $('used').textContent = fmtBytes(used);
+      $('budget').textContent = fmtBytes(budget);
+
+      const ev = s.events?.bytes ?? 0;
+      const cl = s.blobs?.claimed_bytes ?? 0;
+      const un = s.blobs?.unclaimed_bytes ?? 0;
+      const stored = ev + cl + un;
+      // Bar is scaled to the storage budget; fall back to stored total if budget is unknown.
+      const scale = budget > 0 ? Math.max(budget, stored) : stored;
+      [['events', ev], ['claimed', cl], ['unclaimed', un]].forEach(([k, v]) => {
+        $(k + '-bytes').textContent = fmtBytes(v);
+        $(k + '-pct').textContent = fmtShare(v, stored);
+        $('bar-' + k).style.width = (scale > 0 ? clamp(v / scale * 100) : 0) + '%';
+      });
+
+      // Eviction runs above the budget, removing the largest event first.
+      const c = s.eviction?.candidates ?? {};
+      const evicting = budget > 0 && used > budget;
+      const st = $('ev-state');
+      st.textContent = evicting ? 'Evicting' : 'Idle';
+      st.classList.toggle('on', evicting);
+      $('ev-next').textContent = (c.largest_bytes ?? 0) > 0 ? fmtBytes(c.largest_bytes) : '—';
+
+      renderNodes(s.peers?.items ?? []);
+
+      const b = s.peers?.battery ?? { remaining: 1000000, max: 1000000, regen_per_min: 600, mode: 'readwrite' };
+      const pct = b.max > 0 ? clamp(b.remaining / b.max * 100) : 0;
+      $('bat-pct').textContent = Math.round(pct) + '%';
+      $('bat-ring').style.strokeDashoffset = 263.9 * (1 - pct / 100);
+      $('bat-raw').textContent = `${num(b.remaining)} / ${num(b.max)}`;
+      $('bat-regen').textContent = `+${b.regen_per_min.toLocaleString('en-US')} per min`;
+      const mode = $('bat-mode');
+      const label = String(b.mode ?? '').replace(/_/g, ' ');
+      mode.textContent = label ? label.charAt(0).toUpperCase() + label.slice(1) : '—';
+      mode.classList.toggle('on', b.mode === 'readwrite');
+    } catch { /* keep last values */ }
+  }
+
+  async function loadNode() {
+    try {
+      const res = await fetch('/api/v1/node', { cache: 'no-store' });
+      if (!res.ok) return;
+      const n = await res.json();
+      if (n.donate) {
+        const d = $('donate');
+        d.href = `bitcoin:${n.donate}`;
+        d.title = `Donate BTC: ${n.donate}`;
+        d.hidden = false;
+        $('donate-addr').textContent = n.donate;
+        $('donate-foot').hidden = false;
+      }
+      const list = Array.isArray(n.sync) ? n.sync : [];
+      syncConfigured = list.length > 0;
+      configured = new Set(list.map(originOf));
+      renderNodes();
+      if (n.node_id) {
+        const el = $('node-id');
+        el.textContent = n.node_id;
+      }
+    } catch { /* ignore */ }
+  }
+
+  $('donate-copy').addEventListener('click', async () => {
+    const el = $('donate-addr');
+    const btn = $('donate-copy');
+    try {
+      await navigator.clipboard.writeText(el.textContent);
+      btn.textContent = 'Copied';
+    } catch {
+      // No clipboard API (insecure context): select the address to copy.
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const sel = getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      btn.textContent = 'Select & copy';
+    }
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1600);
+  });
+
+  update();
+  loadNode();
+  setInterval(update, 5000);
+</script>
+</body>
+</html>
