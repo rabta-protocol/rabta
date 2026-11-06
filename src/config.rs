@@ -14,7 +14,7 @@ pub const MAX_WHITELIST_PUBKEYS: usize = 64;
 
 /// Node configuration, resolved once at boot.
 ///
-/// Precedence per plan.md §Storage layout: process environment first,
+/// Precedence: process environment first,
 /// then the optional `/data/config.env` file, then built-in defaults.
 /// Invalid values refuse to boot — never a silent fallback.
 #[derive(Debug, Clone)]

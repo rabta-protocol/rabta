@@ -49,7 +49,7 @@ fn label_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"^[A-Za-z0-9:_\.\-\+\/]{1,64}$").unwrap())
 }
 
-/// Full publish-time validation of one envelope (plan.md §Wire format §Events):
+/// Full publish-time validation of one envelope:
 /// shape → TTL window → canonical digest → id claim cross-check → sig verify.
 /// The received body must be ≤ 100 KB; unknown extra fields are ignored and
 /// not persisted (they were never digested).

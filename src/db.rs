@@ -7,7 +7,7 @@ use rusqlite::Connection;
 
 /// SQLite access layer.
 ///
-/// Concurrency contract (plan.md): reads never block writes and writes are
+/// Concurrency contract: reads never block writes and writes are
 /// serialized through exactly one connection-writer. WAL mode gives readers
 /// their own snapshots, so a pool of reader connections is used instead of
 /// sharing the writer's mutex. All DB calls run through `spawn_blocking`.

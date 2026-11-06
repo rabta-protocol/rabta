@@ -3,7 +3,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
 /// Every failure route answers with the same JSON envelope:
-/// `{"error": "<human-readable>", "code": "<machine-readable>"}` (plan.md §Error bodies).
+/// `{"error": "<human-readable>", "code": "<machine-readable>"}`.
 #[derive(Debug)]
 pub struct ApiError {
     pub status: StatusCode,

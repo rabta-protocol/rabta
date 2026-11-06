@@ -1,6 +1,6 @@
 use serde_json::{Map, Number, Value};
 
-/// Canonical JSON for the event digest (plan.md §Wire format):
+/// Canonical JSON for the event digest:
 /// exactly the fields `{bin?, collection, created_at, data, expires_at, labels,
 /// owner}` — **sorted keys, compact separators**. `id` and `sig` are never in
 /// the input. `bin` is optional and omitted from the digest when absent; when
