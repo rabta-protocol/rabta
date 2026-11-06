@@ -3,32 +3,151 @@ name: publish
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: "Image version tag, format X.X.X (digits only)"
-        required: true
+      tag:
+        description: "Release tag, YYYY.MM.DD (optional .N suffix). Defaults to today in UTC."
+        required: false
         type: string
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
-  build-push:
+  prepare:
     runs-on: ubuntu-latest
-    env:
-      VERSION: ${{ inputs.version }}
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
-      - name: Check version format (X.X.X, digits only)
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        id: version
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::version '$VERSION' does not match X.X.X (digits only)"
+          set -euo pipefail
+          TAG="${INPUT_TAG:-$(date -u +%Y.%m.%d)}"
+          if ! printf '%s' "$TAG" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}(\.[0-9]+)?$'; then
+            echo "::error::tag '$TAG' must look like YYYY.MM.DD (optional .N suffix)"
             exit 1
           fi
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::tag '$TAG' already exists; pass tag=${TAG}.1 or a later date"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Releasing $TAG from $GITHUB_SHA"
 
+      - name: Build release notes from recent commits
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          PREV="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          {
+            echo "## Changes"
+            echo
+            if [ -n "$PREV" ]; then
+              echo "Commits since \`$PREV\`:"
+              echo
+              git log "$PREV..HEAD" --no-merges \
+                --pretty=format:"- %s ([%h](https://github.com/${GITHUB_REPOSITORY}/commit/%H))"
+            else
+              echo "Recent commits:"
+              echo
+              git log -20 --no-merges \
+                --pretty=format:"- %s ([%h](https://github.com/${GITHUB_REPOSITORY}/commit/%H))"
+            fi
+            echo
+            echo
+            echo "## Container image"
+            echo
+            echo '```'
+            echo "docker pull ${REGISTRY}/${IMAGE_NAME}:${TAG}"
+            echo '```'
+            echo
+            echo "Also published as \`${IMAGE_NAME}:latest\`."
+            echo
+            echo "## Binaries"
+            echo
+            echo "Static Linux binaries (musl) for \`amd64\` and \`arm64\` are attached."
+            echo "Verify them with \`sha256sum -c SHA256SUMS\`."
+          } > NOTES.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: NOTES.md
+          if-no-files-found: error
+
+  binaries:
+    name: linux-${{ matrix.arch }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            target: aarch64-unknown-linux-musl
+    env:
+      TARGET: ${{ matrix.target }}
+      ARCH: ${{ matrix.arch }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      CC: musl-gcc
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq musl-tools
+
+      - name: Add Rust target
+        run: rustup target add "$TARGET"
+
+      - name: Build binary
+        run: cargo build --release --locked --target "$TARGET"
+
+      - name: Package binary
+        run: |
+          set -euo pipefail
+          NAME="rabta-${RELEASE_TAG}-linux-${ARCH}"
+          mkdir -p dist
+          cp "target/${TARGET}/release/rabta" dist/rabta
+          cp README.md api.md dist/
+          tar -C dist -czf "${NAME}.tar.gz" rabta README.md api.md
+          sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rabta-linux-${{ matrix.arch }}
+          path: |
+            rabta-*.tar.gz
+            rabta-*.tar.gz.sha256
+          if-no-files-found: error
+
+  docker:
+    name: docker
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
       - uses: actions/checkout@v4
 
       - name: Set up QEMU (arm64 emulation)
@@ -50,8 +169,38 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.tag }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
+
+  release:
+    name: release
+    needs: [prepare, binaries, docker]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Combine checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -- *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --notes-file dist/NOTES.md \
+            dist/*.tar.gz dist/SHA256SUMS

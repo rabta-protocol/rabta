@@ -93,7 +93,7 @@ That's it. Your backend is live at `http://localhost:3232`. `STORAGE_LIMIT` is o
 
 Prefer one file? [`compose.yml`](compose.yml) is a ready Portainer stack with a single Rabta service and its own volume. The stack fixes `STORAGE_LIMIT` at 20GB and passes `WHITELIST_PUBKEYS` through from the stack environment; change either in the compose file.
 
-Images are published for **linux/amd64** and **linux/arm64**. Tags: `latest`, `X.X.X`, and `dev`.
+Images are published for **linux/amd64** and **linux/arm64**. Tags: `latest`, `YYYY.MM.DD` (the release date), and `dev`. Each release also attaches static musl binaries for both architectures with a `SHA256SUMS` file.
 
 Rabta serves no HTML. A UI is a static app hosted anywhere that points at the node URL.
 
