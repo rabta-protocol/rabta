@@ -23,9 +23,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
 
-[dev-dependencies]
-rand = "0.8"
-
 [profile.release]
 opt-level = 2
 strip = true
