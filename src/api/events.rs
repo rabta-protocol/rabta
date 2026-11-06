@@ -159,12 +159,13 @@ fn urldecode(s: &str) -> String {
     let h = |c: u8| -> Option<u8> { (c as char).to_digit(16).map(|d| d as u8) };
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let (Some(hi), Some(lo)) = (h(b[i + 1]), h(b[i + 2])) {
-                out.push(hi * 16 + lo);
-                i += 3;
-                continue;
-            }
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let (Some(hi), Some(lo)) = (h(b[i + 1]), h(b[i + 2]))
+        {
+            out.push(hi * 16 + lo);
+            i += 3;
+            continue;
         }
         if b[i] == b'+' {
             out.push(b' ');
@@ -510,10 +511,10 @@ fn read_sse_rows(c: &Connection, after: i64, limit: i64) -> rusqlite::Result<Vec
 }
 
 fn sse_matches(filters: &ListFilters, row: &SseRow) -> bool {
-    if let Some(collection) = &filters.collection {
-        if &row.collection != collection {
-            return false;
-        }
+    if let Some(collection) = &filters.collection
+        && &row.collection != collection
+    {
+        return false;
     }
     if let Some(owner) = &filters.owner_hex {
         let Ok(owner) = hex::decode(owner) else {

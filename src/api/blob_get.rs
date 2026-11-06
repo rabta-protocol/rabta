@@ -126,17 +126,16 @@ async fn local_response(
     if let Some(im) = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
+        && etag_matches(im, hash_hex)
     {
-        if etag_matches(im, hash_hex) {
-            // A 304 is still a read: record it before answering.
-            record_read(n, hash, last_access_at, now).await;
-            let mut resp = StatusCode::NOT_MODIFIED.into_response();
-            resp.headers_mut()
-                .insert(header::ETAG, etag.parse().expect("etag"));
-            resp.headers_mut()
-                .insert(header::CACHE_CONTROL, BLOB_CACHE_CONTROL.parse().unwrap());
-            return Ok(resp);
-        }
+        // A 304 is still a read: record it before answering.
+        record_read(n, hash, last_access_at, now).await;
+        let mut resp = StatusCode::NOT_MODIFIED.into_response();
+        resp.headers_mut()
+            .insert(header::ETAG, etag.parse().expect("etag"));
+        resp.headers_mut()
+            .insert(header::CACHE_CONTROL, BLOB_CACHE_CONTROL.parse().unwrap());
+        return Ok(resp);
     }
 
     let path = blobs::blob_path(&n.cfg.data_dir, hash_hex);
@@ -162,11 +161,11 @@ async fn local_response(
     }
 
     if head {
-        return Ok(builder
+        return builder
             .status(StatusCode::OK)
             .header(header::CONTENT_LENGTH, size.to_string())
             .body(Body::empty())
-            .map_err(|_| ApiError::internal("response"))?);
+            .map_err(|_| ApiError::internal("response"));
     }
 
     let mut file = tokio::fs::File::open(&path)
@@ -201,7 +200,7 @@ async fn local_response(
         Body::from_stream(tokio_util::io::ReaderStream::new(file))
     };
 
-    Ok(builder
+    builder
         .body(body)
-        .map_err(|_| ApiError::internal("response"))?)
+        .map_err(|_| ApiError::internal("response"))
 }

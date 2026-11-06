@@ -35,19 +35,19 @@ async fn main() {
     let cfg = config::Config::load();
     let port = cfg.port;
 
-    if cfg.blobs_enabled() {
-        if let Err(e) = store::blobs::init_dirs(&dir) {
-            panic!("cannot initialize blob layout: {e}");
-        }
+    if cfg.blobs_enabled()
+        && let Err(e) = store::blobs::init_dirs(&dir)
+    {
+        panic!("cannot initialize blob layout: {e}");
     }
 
     let database = db::Db::open(&dir);
 
     // Blob plane boot hygiene: drop crashed temp files and orphan bytes.
-    if cfg.blobs_enabled() {
-        if let Err(e) = store::blobs::boot_hygiene(&database, cfg.data_dir.clone()).await {
-            tracing::error!("blob boot hygiene: {e}");
-        }
+    if cfg.blobs_enabled()
+        && let Err(e) = store::blobs::boot_hygiene(&database, cfg.data_dir.clone()).await
+    {
+        tracing::error!("blob boot hygiene: {e}");
     }
 
     // Apply expiry + watermark immediately instead of waiting one interval.

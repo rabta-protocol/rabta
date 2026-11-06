@@ -477,9 +477,11 @@ pub fn blob_pressure_check(
     let report =
         crate::store::blobs::blob_pass_with(c, now, &cfg.data_dir, unlinks).unwrap_or_default();
     if report.blobs_removed > 0 {
-        let mut out = EvictionStats::default();
-        out.blobs_evicted = report.blobs_removed as u64;
-        out.bytes_reclaimed = report.blob_bytes.max(0) as u64;
+        let out = EvictionStats {
+            blobs_evicted: report.blobs_removed as u64,
+            bytes_reclaimed: report.blob_bytes.max(0) as u64,
+            ..Default::default()
+        };
         record(&out);
     }
 

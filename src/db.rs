@@ -165,12 +165,11 @@ impl Db {
             readers.push(open_reader(&path).expect("cannot open read connection"));
         }
 
-        let db = Db {
+        Db {
             writer: Arc::new(Mutex::new(c)),
             readers: Arc::new(ReaderPool::new(path, readers)),
             events_changed: Arc::new(tokio::sync::Notify::new()),
-        };
-        db
+        }
     }
 
     /// Path of the underlying `index.db`. Used to key per-database runtime
@@ -411,6 +410,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Intentional: the test holds the writer lock across the read to prove the
+    // reader pool completes without it.
+    #[allow(clippy::await_holding_lock)]
     async fn reads_do_not_share_the_writer_lock() {
         let dir = temp_dir("db-readers");
         let db = Db::open(&dir);

@@ -29,7 +29,7 @@ pub struct ParsedEvent {
 }
 
 fn is_hex(s: &str) -> bool {
-    !s.is_empty() && s.len() % 2 == 0 && s.chars().all(|c| c.is_ascii_hexdigit())
+    !s.is_empty() && s.len().is_multiple_of(2) && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Blob references are exact lowercase SHA-256 hex, mirroring the blob routes.
@@ -209,7 +209,7 @@ pub fn parse_and_verify(body: &[u8], now: i64) -> ApiResult<ParsedEvent> {
             "envelope does not hash to its claimed id",
         ));
     }
-    let sig_bytes = hex::decode(&sig_hex).expect("checked hex");
+    let sig_bytes = hex::decode(sig_hex).expect("checked hex");
     let sig_bytes: [u8; 64] = sig_bytes.try_into().unwrap();
     verify_sig(digest, sig_bytes, &vk)?;
 

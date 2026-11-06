@@ -83,7 +83,7 @@ mod tests {
             "ed25519:ab",
             &[],
             &json!({}),
-            Some(&[hash.clone()]),
+            Some(std::slice::from_ref(&hash)),
         );
         let s = String::from_utf8(canonical_value(&v)).unwrap();
         assert_eq!(
