@@ -5,6 +5,7 @@ mod db;
 mod error;
 mod store;
 
+use std::future::IntoFuture;
 use std::net::SocketAddr;
 
 use axum::Router;
@@ -13,6 +14,9 @@ use tower_http::cors::CorsLayer;
 
 use api::AppState;
 use api::routes;
+
+/// Bound on draining connections after SIGTERM/SIGINT.
+const SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn data_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| "/data".to_string()))
@@ -53,7 +57,9 @@ async fn main() {
     // Apply expiry + watermark immediately instead of waiting one interval.
     store::reaper::reaper_tick(&database, cfg.clone()).await;
 
-    let state = api::Node::new(cfg.clone(), database.clone());
+    // One flag stops the listener, the SSE feed, and every live stream.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let state = api::Node::new(cfg.clone(), database.clone(), shutdown_rx.clone());
 
     if !cfg.whitelist.is_empty() {
         tracing::info!(
@@ -85,10 +91,30 @@ async fn main() {
         .unwrap_or_else(|e| panic!("cannot bind {addr}: {e}"));
     tracing::info!("rabta listening on {addr}");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .expect("server error");
+    let serve = axum::serve(listener, app)
+        .with_graceful_shutdown({
+            let mut rx = shutdown_rx.clone();
+            async move { api::wait_for_shutdown(&mut rx).await }
+        })
+        .into_future();
+    tokio::pin!(serve);
+
+    // Flip the flag so streams close themselves, then bound the drain so a
+    // stuck client cannot turn a clean stop into SIGKILL.
+    tokio::select! {
+        res = &mut serve => res.expect("server error"),
+        _ = shutdown_signal() => {
+            tracing::info!("shutdown signal received");
+            let _ = shutdown_tx.send(true);
+            match tokio::time::timeout(SHUTDOWN_DRAIN, &mut serve).await {
+                Ok(res) => res.expect("server error"),
+                Err(_) => tracing::warn!(
+                    "drain timed out after {}s; exiting",
+                    SHUTDOWN_DRAIN.as_secs()
+                ),
+            }
+        }
+    }
     tracing::info!("shutdown complete");
 }
 
@@ -130,5 +156,4 @@ async fn shutdown_signal() {
     {
         let _ = ctrl_c.await;
     }
-    tracing::info!("shutdown signal received");
 }

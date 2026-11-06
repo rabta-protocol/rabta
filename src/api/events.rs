@@ -412,6 +412,7 @@ fn sse_feeds() -> &'static tokio::sync::Mutex<std::collections::HashMap<std::pat
 /// retire itself between handing out the sender and the caller subscribing.
 async fn ensure_sse_feed(
     db: &crate::db::Db,
+    shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> tokio::sync::broadcast::Receiver<std::sync::Arc<SseRow>> {
     let mut feeds = sse_feeds().lock().await;
     if let Some(tx) = feeds.get(db.path()) {
@@ -432,13 +433,20 @@ async fn ensure_sse_feed(
         db.path().to_path_buf(),
         tx,
         cursor,
+        shutdown,
     ));
     rx
 }
 
 /// Drain committed rows, then sleep until ingest signals another insert. With
 /// no subscribers the feed removes itself, so an idle node does no SSE DB work.
-async fn sse_feed_loop(db: crate::db::Db, path: std::path::PathBuf, tx: SseFeed, mut cursor: i64) {
+async fn sse_feed_loop(
+    db: crate::db::Db,
+    path: std::path::PathBuf,
+    tx: SseFeed,
+    mut cursor: i64,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
     loop {
         // Read until a short batch, so a burst is fully drained before sleeping.
         loop {
@@ -454,19 +462,36 @@ async fn sse_feed_loop(db: crate::db::Db, path: std::path::PathBuf, tx: SseFeed,
             for row in rows {
                 let _ = tx.send(std::sync::Arc::new(row));
             }
-            if !full {
+            if !full || *shutdown.borrow() {
                 break;
             }
         }
 
+        if *shutdown.borrow() {
+            remove_sse_feed(&path, &tx).await;
+            tracing::debug!(path = %path.display(), "sse feed stopped for shutdown");
+            return;
+        }
         if tx.receiver_count() == 0 && retire_sse_feed(&path, &tx).await {
             tracing::debug!(path = %path.display(), "sse feed retired (no subscribers)");
             return;
         }
         tokio::select! {
+            _ = super::wait_for_shutdown(&mut shutdown) => {}
             _ = db.wait_for_event_row() => {}
             _ = tx.closed() => {}
         }
+    }
+}
+
+/// Drop a feed from the map only if it is still the registered channel.
+async fn remove_sse_feed(path: &std::path::Path, tx: &SseFeed) {
+    let mut feeds = sse_feeds().lock().await;
+    if feeds
+        .get(path)
+        .is_some_and(|current| current.same_channel(tx))
+    {
+        feeds.remove(path);
     }
 }
 
@@ -551,9 +576,13 @@ async fn sse_catch_up(
     from: i64,
     to: i64,
     tx: &SseSender,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<i64, ()> {
     let mut next = from;
     while next < to {
+        if *shutdown.borrow() {
+            return Err(());
+        }
         let filters = filters.clone();
         let lo = next;
         let hi = to;
@@ -582,8 +611,13 @@ async fn sse_catch_up(
         }
         let full = batch.len() == 200;
         for r in &batch {
-            if tx.send(Ok(sse_frame(r.seq, &r.served))).await.is_err() {
-                return Err(());
+            tokio::select! {
+                sent = tx.send(Ok(sse_frame(r.seq, &r.served))) => {
+                    if sent.is_err() {
+                        return Err(());
+                    }
+                }
+                _ = super::wait_for_shutdown(shutdown) => return Err(()),
             }
         }
         next = batch.last().map(|r| r.seq).unwrap_or(next);
@@ -618,14 +652,20 @@ async fn stream_inner(n: AppState, headers: HeaderMap, p: RawQ) -> ApiResult<Res
 
     let (tx, rx) = mpsc::channel::<Result<axum::body::Bytes, axum::Error>>(32);
     let db = n.db.clone();
+    let mut shutdown = n.shutdown.clone();
 
     tokio::spawn(async move {
         // subscriber accounting lives with the connection, not the response
         let _guard = SseGuard;
 
+        // A connection admitted during shutdown must not open a backlog burst.
+        if *shutdown.borrow() {
+            return;
+        }
+
         // Subscribe before taking the high-water mark. Rows committed while
         // the backlog is fetched are then either in that backlog or queued.
-        let mut feed = ensure_sse_feed(&db).await;
+        let mut feed = ensure_sse_feed(&db, shutdown.clone()).await;
         let high_water = db
             .read(|c: &Connection| {
                 c.query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |r| r.get(0))
@@ -641,9 +681,9 @@ async fn stream_inner(n: AppState, headers: HeaderMap, p: RawQ) -> ApiResult<Res
         tracing::debug!(sse_start = next_seq, high_water, "sse worker attached");
 
         if next_seq < high_water {
-            match sse_catch_up(&db, &filters, next_seq, high_water, &tx).await {
+            match sse_catch_up(&db, &filters, next_seq, high_water, &tx, &mut shutdown).await {
                 Ok(next) => next_seq = next,
-                Err(()) => return, // client went away or DB failed
+                Err(()) => return, // client went away, shutting down, or DB failed
             }
         }
 
@@ -655,6 +695,8 @@ async fn stream_inner(n: AppState, headers: HeaderMap, p: RawQ) -> ApiResult<Res
 
         loop {
             tokio::select! {
+                // Dropping `tx` here ends the response body.
+                _ = super::wait_for_shutdown(&mut shutdown) => return,
                 received = feed.recv() => {
                     match received {
                         Ok(row) => {
@@ -685,7 +727,16 @@ async fn stream_inner(n: AppState, headers: HeaderMap, p: RawQ) -> ApiResult<Res
                                 })
                                 .await;
                             if current > next_seq {
-                                match sse_catch_up(&db, &filters, next_seq, current, &tx).await {
+                                match sse_catch_up(
+                                    &db,
+                                    &filters,
+                                    next_seq,
+                                    current,
+                                    &tx,
+                                    &mut shutdown,
+                                )
+                                .await
+                                {
                                     Ok(next) => next_seq = next,
                                     Err(()) => return,
                                 }
@@ -734,9 +785,26 @@ mod tests {
     }
 
     fn test_state(dir: &std::path::Path) -> AppState {
-        let cfg = crate::config::Config::test_cfg(dir.to_path_buf(), 10_000_000);
-        crate::api::Node::new(cfg, crate::db::Db::open(dir))
+        let (n, shutdown) = test_state_with_shutdown(dir);
+        // A dropped sender means "shutdown", so keep it alive for the test.
+        let _ = Box::leak(Box::new(shutdown));
+        n
     }
+
+    /// Also hands back the flag's sender so a test can act as SIGTERM.
+    fn test_state_with_shutdown(
+        dir: &std::path::Path,
+    ) -> (AppState, tokio::sync::watch::Sender<bool>) {
+        let cfg = crate::config::Config::test_cfg(dir.to_path_buf(), 10_000_000);
+        let (shutdown, rx) = tokio::sync::watch::channel(false);
+        (
+            crate::api::Node::new(cfg, crate::db::Db::open(dir), rx),
+            shutdown,
+        )
+    }
+
+    /// SSE admission is process-wide; stream tests must not overlap.
+    static STREAM_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[tokio::test]
     async fn publish_returns_json_content_type() {
@@ -800,7 +868,7 @@ mod tests {
     async fn feed_wakes_on_event_signal_and_retires_idle() {
         let dir = temp_dir("event-feed-wake");
         let n = test_state(&dir);
-        let mut feed = ensure_sse_feed(&n.db).await;
+        let mut feed = ensure_sse_feed(&n.db, n.shutdown.clone()).await;
 
         insert_chat_row(&n).await;
         n.db.notify_event_row();
@@ -834,6 +902,7 @@ mod tests {
     async fn stream_replays_backlog_on_resume() {
         use futures_util::StreamExt;
 
+        let _stream_guard = STREAM_TEST_LOCK.lock().await;
         let dir = temp_dir("event-stream-resume");
         let n = test_state(&dir);
 
@@ -870,6 +939,52 @@ mod tests {
         );
 
         drop(body);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression: an open SSE stream used to block shutdown until SIGKILL.
+    #[tokio::test]
+    async fn stream_closes_on_shutdown_signal() {
+        use futures_util::StreamExt;
+
+        let _stream_guard = STREAM_TEST_LOCK.lock().await;
+        let dir = temp_dir("event-stream-shutdown");
+        let (n, shutdown) = test_state_with_shutdown(&dir);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", axum::http::HeaderValue::from_static("0"));
+        let resp = stream_inner(
+            n.clone(),
+            headers,
+            RawQ {
+                collection: Some("chat".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut body = resp.into_body().into_data_stream();
+
+        // One real frame proves the worker attached and is streaming.
+        insert_chat_row(&n).await;
+        n.db.notify_event_row();
+        let frame = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .expect("stream did not deliver a row")
+            .expect("event stream ended early")
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&frame).contains("event: message"),
+            "unexpected frame: {frame:?}"
+        );
+
+        shutdown.send(true).unwrap();
+
+        let end = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .expect("stream stayed open after the shutdown signal");
+        assert!(end.is_none(), "stream produced a frame after shutdown");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
