@@ -15,11 +15,11 @@
 #   docker run -d --name rabta -p 3232:3232 -v rabta:/data \
 #     --restart unless-stopped \
 #     -e STORAGE_LIMIT=20GB \
-#     ghcr.io/besoeasy/rabta:latest
+#     ghcr.io/rabta-protocol/rabta:latest
 
 services:
   rabta:
-    image: ghcr.io/besoeasy/rabta:latest
+    image: ghcr.io/rabta-protocol/rabta:latest
     container_name: rabta
     ports:
       - "3232:3232"

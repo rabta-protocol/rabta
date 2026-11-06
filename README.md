@@ -2,10 +2,10 @@
 
 ### The self-hosted, zero-knowledge dumb relay for signed events.
 
-[![GitHub stars](https://img.shields.io/github/stars/besoeasy/rabta?style=flat&logo=github)](https://github.com/besoeasy/rabta/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/rabta-protocol/rabta?style=flat&logo=github)](https://github.com/rabta-protocol/rabta/stargazers)
 [![Rust](https://img.shields.io/badge/Rust-2024-000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![SQLite](https://img.shields.io/badge/SQLite-embedded-003B57?logo=sqlite&logoColor=white)](https://sqlite.org/)
-[![Docker](https://img.shields.io/badge/Docker-amd64%20%7C%20arm64-2496ED?logo=docker&logoColor=white)](https://github.com/besoeasy/rabta/pkgs/container/rabta)
+[![Docker](https://img.shields.io/badge/Docker-amd64%20%7C%20arm64-2496ED?logo=docker&logoColor=white)](https://github.com/rabta-protocol/rabta/pkgs/container/rabta)
 
 Rabta is the backend you run when you want to **ship the product, not the infrastructure**. It stores signed events in SQLite, streams changes over SSE, and expires data automatically — from one Rust binary, one SQLite file, and one Docker container.
 
@@ -79,7 +79,7 @@ docker run -d \
   -v rabta:/data \
   --restart unless-stopped \
   -e STORAGE_LIMIT=20GB \
-  ghcr.io/besoeasy/rabta:latest
+  ghcr.io/rabta-protocol/rabta:latest
 
 curl -s http://localhost:3232/api/v1/health
 # {"status":"ok","live_events":0,"live_blobs":0}
