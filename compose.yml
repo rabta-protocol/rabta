@@ -1,0 +1,40 @@
+# Rabta — Portainer stack example.
+#
+# One container. Events live in SQLite and blobs live on the same volume under
+# one byte budget, STORAGE_LIMIT. Unclaimed blob uploads stay outside the budget until
+# a live event references them.
+#
+# Pin owners whose events must survive storage pressure:
+#   WHITELIST_PUBKEYS=ed25519:<64 hex>,<64 hex>
+# Pinned events, and the blobs their live events claim, skip pressure
+# eviction. TTL expiry still applies to them.
+#
+# Deploy as a Portainer stack (Web editor or Git repository), or run the same
+# service with `docker run`:
+#
+#   docker run -d --name rabta -p 3232:3232 -v rabta:/data \
+#     --restart unless-stopped \
+#     -e STORAGE_LIMIT=20GB \
+#     ghcr.io/besoeasy/rabta:latest
+
+services:
+  rabta:
+    image: ghcr.io/besoeasy/rabta:latest
+    container_name: rabta
+    ports:
+      - "3232:3232"
+    environment:
+      STORAGE_LIMIT: 20GB
+      WHITELIST_PUBKEYS: ${WHITELIST_PUBKEYS:-}
+    volumes:
+      - rabta:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3232/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  rabta:

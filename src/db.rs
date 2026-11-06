@@ -1,0 +1,493 @@
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
+
+use rusqlite::Connection;
+
+/// SQLite access layer.
+///
+/// Concurrency contract (plan.md): reads never block writes and writes are
+/// serialized through exactly one connection-writer. WAL mode gives readers
+/// their own snapshots, so a pool of reader connections is used instead of
+/// sharing the writer's mutex. All DB calls run through `spawn_blocking`.
+#[derive(Clone)]
+pub struct Db {
+    writer: Arc<Mutex<Connection>>,
+    readers: Arc<ReaderPool>,
+    /// Wakes the shared SSE feed after a committed event insert.
+    events_changed: Arc<tokio::sync::Notify>,
+}
+
+/// A pool of read-only SQLite connections. It starts small and opens extra
+/// readers on demand up to a cap, so concurrent reads never queue behind each
+/// other just because the machine has fewer CPUs. The idle-list lock is held
+/// only while taking/returning a connection, never while a query runs.
+struct ReaderPool {
+    path: PathBuf,
+    state: Mutex<ReaderPoolState>,
+    available: Condvar,
+    max: usize,
+}
+
+struct ReaderPoolState {
+    idle: Vec<Connection>,
+    open: usize,
+}
+
+struct ReaderGuard {
+    pool: Arc<ReaderPool>,
+    conn: Option<Connection>,
+}
+
+const READER_POOL_MAX: usize = 64;
+/// A read that cannot obtain a pooled connection within this window falls back
+/// to the writer instead of waiting on the condvar forever.
+const READER_WAIT: Duration = Duration::from_secs(5);
+
+impl ReaderPool {
+    fn new(path: PathBuf, connections: Vec<Connection>) -> ReaderPool {
+        let open = connections.len();
+        ReaderPool {
+            path,
+            state: Mutex::new(ReaderPoolState {
+                idle: connections,
+                open,
+            }),
+            available: Condvar::new(),
+            max: READER_POOL_MAX,
+        }
+    }
+
+    fn acquire(self: &Arc<Self>) -> rusqlite::Result<ReaderGuard> {
+        loop {
+            let mut state = self.state.lock().expect("db reader mutex poisoned");
+            if let Some(conn) = state.idle.pop() {
+                return Ok(ReaderGuard {
+                    pool: Arc::clone(self),
+                    conn: Some(conn),
+                });
+            }
+            if state.open < self.max {
+                state.open += 1;
+                drop(state);
+                match open_reader(&self.path) {
+                    Ok(conn) => {
+                        return Ok(ReaderGuard {
+                            pool: Arc::clone(self),
+                            conn: Some(conn),
+                        });
+                    }
+                    Err(e) => {
+                        let mut state = self.state.lock().expect("db reader mutex poisoned");
+                        state.open -= 1;
+                        self.available.notify_one();
+                        return Err(e);
+                    }
+                }
+            }
+            let (state, timed_out) = self
+                .available
+                .wait_timeout(state, READER_WAIT)
+                .expect("db reader condvar poisoned");
+            if timed_out.timed_out() {
+                drop(state);
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                    Some("timed out waiting for a reader connection".to_string()),
+                ));
+            }
+        }
+    }
+
+    fn release(&self, conn: Connection) {
+        let mut state = self.state.lock().expect("db reader mutex poisoned");
+        state.idle.push(conn);
+        self.available.notify_one();
+    }
+}
+
+impl Deref for ReaderGuard {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        self.conn.as_ref().expect("reader guard already released")
+    }
+}
+
+impl Drop for ReaderGuard {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            self.pool.release(conn);
+        }
+    }
+}
+
+pub const MAX_ENVELOPE: usize = 100_000;
+/// Optional blob references an event may carry. A live event that lists a
+/// blob keeps it until the event's own expiry; validation still never
+/// requires the blob to exist.
+pub const MAX_BIN_REFS: usize = 8;
+pub const MAX_TTL_SECONDS: i64 = 10 * 365 * 86400; // max_age: 10 years
+pub const MIN_TTL_SECONDS: i64 = 60; // expires_at must be > created_at + 60s
+/// An unclaimed blob lives 48 hours from its first upload. Reads do not
+/// extend it; claiming it from an event replaces this with the event's
+/// `expires_at`.
+pub const BLOB_UNCLAIMED_TTL_SECONDS: i64 = 48 * 3600;
+/// Access tracking is write-throttled: a read only touches the row when the
+/// previous touch is at least this old, bounding writer load.
+pub const BLOB_REFRESH_SECONDS: i64 = 3600;
+/// A freshly uploaded blob is never a pressure candidate before this.
+pub const BLOB_GRACE_SECONDS: i64 = 3600;
+/// Idle longer than this makes a blob "cold" (pressure tier 2).
+pub const BLOB_COLD_AFTER_SECONDS: i64 = 86400;
+/// Idle shorter than this makes a blob "active" (pressure tier 4, last resort).
+pub const BLOB_ACTIVE_WINDOW_SECONDS: i64 = 3600;
+
+impl Db {
+    pub fn open(data_dir: &Path) -> Db {
+        let path = data_dir.join("index.db");
+        let c = Connection::open(&path).expect("cannot open /data/index.db");
+        configure_connection(&c);
+        c.pragma_update(None, "journal_mode", "WAL").ok();
+        c.execute_batch(SCHEMA).expect("schema init failed");
+        crate::store::blobs::reconcile_blob_expiry(&c).ok();
+        reconcile_counters(&c);
+
+        // One writer + a reader pool. WAL lets readers run against a stable
+        // snapshot while the writer commits; they never share its lock.
+        let reader_count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(2, 8);
+        let mut readers = Vec::with_capacity(reader_count);
+        for _ in 0..reader_count {
+            readers.push(open_reader(&path).expect("cannot open read connection"));
+        }
+
+        let db = Db {
+            writer: Arc::new(Mutex::new(c)),
+            readers: Arc::new(ReaderPool::new(path, readers)),
+            events_changed: Arc::new(tokio::sync::Notify::new()),
+        };
+        db
+    }
+
+    /// Path of the underlying `index.db`. Used to key per-database runtime
+    /// state (e.g. the shared SSE feed) when several `Db`s exist in-process.
+    pub fn path(&self) -> &Path {
+        &self.readers.path
+    }
+
+    /// Wake the shared SSE feed after committing new event rows. Callers may
+    /// signal after a batch; notifications coalesce.
+    pub fn notify_event_row(&self) {
+        self.events_changed.notify_one();
+    }
+
+    /// Resolve on the next event-row signal (or immediately if one is queued).
+    pub async fn wait_for_event_row(&self) {
+        self.events_changed.notified().await;
+    }
+
+    /// Run a closure against the single writer connection inside a blocking
+    /// task; writes are serialized, readers are not.
+    pub async fn write<T, F>(&self, f: F) -> T
+    where
+        F: FnOnce(&Connection) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let writer = self.writer.clone();
+        tokio::task::spawn_blocking(move || {
+            // Recover rather than wedge the single writer forever: SQLite rolls
+            // back any uncommitted transaction while the panic unwinds.
+            let c = writer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            f(&c)
+        })
+        .await
+        .expect("db write task panicked")
+    }
+
+    /// Read-only closure on a pooled connection; short queries only. The
+    /// connection is checked out for the duration of `f`, so concurrent reads
+    /// proceed independently and never queue behind a writer.
+    pub async fn read<T, F>(&self, f: F) -> T
+    where
+        F: FnOnce(&Connection) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let pool = self.readers.clone();
+        let writer = self.writer.clone();
+        tokio::task::spawn_blocking(move || match pool.acquire() {
+            Ok(c) => f(&c),
+            Err(e) => {
+                // The reader pool is an optimization, not a requirement: a
+                // read that cannot open or borrow a reader still completes on
+                // the writer (serialized, but never parked forever).
+                tracing::warn!(error = %e, "reader pool unavailable; using the writer for this read");
+                let c = writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                f(&c)
+            }
+        })
+        .await
+        .expect("db read task panicked")
+    }
+}
+
+fn open_reader(path: &Path) -> rusqlite::Result<Connection> {
+    let c = Connection::open(path)?;
+    configure_connection(&c);
+    c.pragma_update(None, "query_only", true).ok();
+    Ok(c)
+}
+
+fn configure_connection(c: &Connection) {
+    c.pragma_update(None, "synchronous", "NORMAL").ok();
+    c.pragma_update(None, "temp_store", "MEMORY").ok();
+    c.busy_timeout(std::time::Duration::from_secs(10)).ok();
+}
+
+/// Recompute the live_bytes counters from the tables themselves — a periodic
+/// hygiene pass, and the boot-time repair. `live_bytes` is normally maintained
+/// per transaction, never recomputed.
+pub fn reconcile_counters(c: &Connection) {
+    let get = |sql: &str| -> i64 { c.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
+    let ev = get("SELECT COALESCE(SUM(size),0) FROM events WHERE state='live'");
+    let bl = get("SELECT COALESCE(SUM(size),0) FROM blobs WHERE state='live'");
+    let cl = get("SELECT COALESCE(SUM(b.size),0)
+           FROM blobs b
+          WHERE b.state='live'
+            AND EXISTS (
+              SELECT 1 FROM blob_refs r
+                JOIN events e ON e.id = r.event_id
+               WHERE r.hash = b.hash AND e.state = 'live'
+            )");
+    c.execute_batch(&format!(
+        "INSERT INTO counters(k,v) VALUES
+           ('live_bytes_events',{ev}),
+           ('live_bytes_blobs',{bl}),
+           ('live_bytes_claimed_blobs',{cl})
+         ON CONFLICT(k) DO UPDATE SET v=excluded.v;"
+    ))
+    .ok();
+    tracing::info!(
+        "counters reconciled: events {} + claimed blobs {} (all blobs {}) bytes",
+        ev,
+        cl,
+        bl
+    );
+}
+
+pub const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS events (
+  id          BLOB(32) PRIMARY KEY,   -- raw sha256 digest
+  seq         INTEGER NOT NULL DEFAULT 0, -- monotonic ingest sequence (cursors/SSE ids)
+  owner       BLOB(32) NOT NULL,
+  collection  TEXT    NOT NULL,
+  created_at  INTEGER NOT NULL,
+  expires_at  INTEGER NOT NULL,       -- time of death; reaper deletes <= now
+  data        BLOB    NOT NULL,       -- stored envelope JSON (canonical + id + sig)
+  labels      TEXT    NOT NULL,       -- JSON array (denormalized view copy)
+  size        INTEGER NOT NULL,       -- envelope bytes (as served)
+  mime        TEXT    NOT NULL DEFAULT 'application/json',
+  state       TEXT    NOT NULL DEFAULT 'live'
+);
+CREATE INDEX IF NOT EXISTS ev_collection ON events(collection);
+CREATE INDEX IF NOT EXISTS ev_owner      ON events(owner);
+CREATE INDEX IF NOT EXISTS ev_created    ON events(created_at);
+CREATE INDEX IF NOT EXISTS ev_expires    ON events(expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS ev_seq ON events(seq) WHERE seq > 0;
+
+CREATE TABLE IF NOT EXISTS labels (
+  event_id BLOB(32) NOT NULL,
+  label    TEXT     NOT NULL,
+  PRIMARY KEY (event_id, label)
+);
+CREATE INDEX IF NOT EXISTS lab_label ON labels(label);
+
+CREATE TABLE IF NOT EXISTS blobs (
+  hash      BLOB(32) PRIMARY KEY,     -- raw sha256 of the bytes
+  size      INTEGER NOT NULL,
+  stored_at INTEGER NOT NULL,         -- unix seconds; never resets
+  expires_at INTEGER NOT NULL,        -- claimed: max event expiry; else stored_at + 48h
+  last_access_at INTEGER NOT NULL DEFAULT 0, -- 0 = never read since upload
+  access_count   INTEGER NOT NULL DEFAULT 0,
+  state     TEXT    NOT NULL DEFAULT 'live'
+);
+CREATE INDEX IF NOT EXISTS blob_expires ON blobs(expires_at);
+CREATE INDEX IF NOT EXISTS blob_access  ON blobs(last_access_at);
+
+CREATE TABLE IF NOT EXISTS blob_refs (
+  hash     BLOB(32) NOT NULL,         -- referenced blob
+  event_id BLOB(32) NOT NULL,         -- live event carrying it in `bin`
+  PRIMARY KEY (hash, event_id)
+);
+CREATE INDEX IF NOT EXISTS bref_event ON blob_refs(event_id);
+
+CREATE TABLE IF NOT EXISTS counters (
+  k TEXT PRIMARY KEY,
+  v INTEGER NOT NULL
+);
+"#;
+
+/// O(1) budget totals from the counters table (never SUM(size) on hot paths).
+/// Returns `(events, claimed blobs)`: the bytes charged to the single budget.
+/// Unclaimed blobs are intentionally excluded.
+pub fn live_bytes(c: &Connection) -> (i64, i64) {
+    let get = |k: &str| -> i64 {
+        c.query_row("SELECT v FROM counters WHERE k = ?", [k], |r| r.get(0))
+            .unwrap_or(0)
+    };
+    (get("live_bytes_events"), get("live_bytes_claimed_blobs"))
+}
+
+/// All live blob bytes, claimed or not, for diagnostics.
+pub fn blob_bytes(c: &Connection) -> i64 {
+    c.query_row(
+        "SELECT v FROM counters WHERE k = 'live_bytes_blobs'",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
+}
+
+/// Combined budget usage: events plus claimed blobs.
+pub fn used_bytes(c: &Connection) -> i64 {
+    let (ev, cl) = live_bytes(c);
+    ev.max(0).saturating_add(cl.max(0))
+}
+
+/// Allocate the next monotonic event sequence. Called inside the event insert
+/// transaction, so a rollback also rolls the counter back (no gaps within a
+/// committed stream, and never a value that could be reused after deletion).
+pub fn next_event_seq(c: &Connection) -> rusqlite::Result<i64> {
+    c.execute(
+        "INSERT INTO counters(k,v) VALUES('event_seq', 1)
+         ON CONFLICT(k) DO UPDATE SET v = v + 1",
+        [],
+    )?;
+    c.query_row("SELECT v FROM counters WHERE k = 'event_seq'", [], |r| {
+        r.get(0)
+    })
+}
+
+pub fn bump_counters(
+    c: &Connection,
+    events_delta: i64,
+    blobs_delta: i64,
+    claimed_delta: i64,
+) -> rusqlite::Result<()> {
+    for (key, delta) in [
+        ("live_bytes_events", events_delta),
+        ("live_bytes_blobs", blobs_delta),
+        ("live_bytes_claimed_blobs", claimed_delta),
+    ] {
+        if delta != 0 {
+            c.execute(
+                "INSERT INTO counters(k,v) VALUES(?1, ?2)
+                 ON CONFLICT(k) DO UPDATE SET v = v + ?2",
+                rusqlite::params![key, delta],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rabta-{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn reads_do_not_share_the_writer_lock() {
+        let dir = temp_dir("db-readers");
+        let db = Db::open(&dir);
+
+        // Simulate an in-flight write holding the writer connection.
+        let writer = db.writer.lock().unwrap();
+        let read = tokio::time::timeout(
+            Duration::from_secs(1),
+            db.read(|c| c.query_row("SELECT 1", [], |r| r.get::<_, i64>(0)).unwrap()),
+        )
+        .await;
+        drop(writer);
+
+        assert_eq!(read.expect("read blocked behind the writer"), 1);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The old cursor was the implicit rowid; deleting the highest row made
+    /// SQLite reuse it. The sequence counter must never move backwards.
+    #[tokio::test]
+    async fn event_sequence_survives_deleting_the_highest_row() {
+        let dir = temp_dir("db-seq");
+        let db = Db::open(&dir);
+
+        let first = db
+            .write(|c| {
+                let seq = next_event_seq(c).unwrap();
+                c.execute(
+                    "INSERT INTO events(id,seq,owner,collection,created_at,expires_at,data,labels,size,state)
+                     VALUES (?1,?2,?3,'c',1,9999999999,x'7b7d','[]',2,'live')",
+                    rusqlite::params![[1u8; 32], seq, &[0u8; 32]],
+                )
+                .unwrap();
+                seq
+            })
+            .await;
+        db.write(|c| {
+            c.execute("DELETE FROM events", []).unwrap();
+        })
+        .await;
+        let second = db.write(|c| next_event_seq(c).unwrap()).await;
+
+        assert_eq!(first, 1);
+        assert_eq!(
+            second, 2,
+            "sequence reused after the highest row was deleted"
+        );
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reader that cannot be opened must surface an error immediately, not
+    /// park the request on a condvar that nothing can signal.
+    #[test]
+    fn reader_pool_open_failure_returns_an_error() {
+        let missing = std::env::temp_dir()
+            .join(format!(
+                "rabta-missing-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ))
+            .join("index.db");
+        let pool = Arc::new(ReaderPool::new(missing, Vec::new()));
+
+        let start = std::time::Instant::now();
+        let err = match pool.acquire() {
+            Ok(_) => panic!("an unopenable reader must report an error"),
+            Err(e) => e,
+        };
+        assert!(start.elapsed() < Duration::from_secs(2), "acquire stalled");
+        assert!(
+            err.to_string().contains("unable to open"),
+            "unexpected error: {err}"
+        );
+    }
+}
