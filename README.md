@@ -7,10 +7,6 @@
 [![SQLite](https://img.shields.io/badge/SQLite-embedded-003B57?logo=sqlite&logoColor=white)](https://sqlite.org/)
 [![Docker](https://img.shields.io/badge/Docker-amd64%20%7C%20arm64-2496ED?logo=docker&logoColor=white)](https://github.com/besoeasy/rabta/pkgs/container/rabta)
 
-<p align="center">
-  <img src="assets/social-preview.png" alt="Rabta — self-hosted zero-knowledge dumb relay for signed events and content-addressed blobs" width="100%">
-</p>
-
 Rabta is the backend you run when you want to **ship the product, not the infrastructure**. It stores signed events in SQLite, streams changes over SSE, and expires data automatically — from one Rust binary, one SQLite file, and one Docker container.
 
 Blobs are stored locally: raw bytes are content-addressed by SHA-256 and streamed to disk. An unclaimed blob lives 48 hours; a blob listed in a live event's `bin` expires with that event. Events and claimed blobs share one byte budget; unclaimed uploads stay outside it until an event claims them.
