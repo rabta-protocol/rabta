@@ -2,11 +2,6 @@ name: publish
 
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Release tag, X.Y.Z. Defaults to the version in Cargo.toml."
-        required: false
-        type: string
 
 concurrency:
   group: publish
@@ -36,8 +31,6 @@ jobs:
 
       - name: Resolve release tag
         id: version
-        env:
-          INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
@@ -45,9 +38,9 @@ jobs:
             echo "::error::could not read version from Cargo.toml"
             exit 1
           fi
-          TAG="${INPUT_TAG:-$VERSION}"
+          TAG="$VERSION"
           if ! printf '%s' "$TAG" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
-            echo "::error::tag '$TAG' must look like X.Y.Z (optional -prerelease suffix)"
+            echo "::error::version '$TAG' in Cargo.toml must look like X.Y.Z"
             exit 1
           fi
           if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
@@ -55,7 +48,7 @@ jobs:
             exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Releasing $TAG (Cargo version $VERSION) from $GITHUB_SHA"
+          echo "Releasing $TAG from $GITHUB_SHA"
 
       - name: Build release notes from recent commits
         env:
