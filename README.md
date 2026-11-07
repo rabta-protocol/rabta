@@ -61,9 +61,10 @@ curl -N 'http://localhost:3232/api/v1/events/stream?collection=chat/room-42'
 ## Features
 
 - **Signed events** — Ed25519 + SHA-256 over canonical JSON. Idempotent publish, cursor pagination, fetch by ID.
+- **Owner-signed deletion** — the key that signed an event can hard-delete it, up to 100 IDs per signed request. Live SSE clients receive a delete notice.
 - **Realtime streaming** — SSE with `Last-Event-ID` resume, 15-second keepalive, 256-subscriber default cap.
 - **File uploads in the box** — `PUT /api/v1/blobs` streams raw bytes to disk and returns the SHA-256. No IPFS, gateway, or multipart.
-- **Retention built in** — Every event has a mandatory TTL. Unclaimed blobs expire in 48 hours; blob claims expire with their latest live event.
+- **Retention built in** — Every event has a mandatory TTL, and owners can delete early. Unclaimed blobs expire in 48 hours; blob claims expire with their latest live event.
 - **One storage budget** — `STORAGE_LIMIT` covers envelopes + claimed blobs. Over-budget writes evict events first, largest footprint first.
 - **Pin what matters** — `WHITELIST_PUBKEYS` protects chosen keys from eviction (TTL still applies).
 - **Zero ops** — Rust + SQLite + Axum. No Postgres, Redis, Kafka, or cloud account. Permissive CORS, no proprietary SDK.
@@ -98,9 +99,9 @@ Set env vars or `KEY=VALUE` lines in `/data/config.env`. Process environment win
 | `WHITELIST_PUBKEYS` | — | Up to 64 `ed25519:<hex>` keys pinned from eviction |
 | `RUST_LOG` | `info` | Log filter |
 
-Hard limits: envelopes ≤100KB, TTLs 60s–10 years, single blob ≤1% of the budget, unclaimed blobs 48h. Full table in [api.md](api.md#limits-and-runtime-configuration).
+Hard limits: envelopes ≤100KB, deletion requests ≤16KB and ≤100 IDs, TTLs 60s–10 years, single blob ≤1% of the budget, unclaimed blobs 48h. Full table in [api.md](api.md#limits-and-runtime-configuration).
 
-Rabta has no auth. Anyone who can reach the node can publish. For public deployments, put it behind TLS and an authenticated reverse proxy.
+Rabta has no auth. Anyone who can reach the node can publish. Deleting an event requires a signature from the key that owns it. For public deployments, put it behind TLS and an authenticated reverse proxy.
 
 ## API
 
@@ -109,6 +110,7 @@ Rabta has no auth. Anyone who can reach the node can publish. For public deploym
 | Publish | `POST /api/v1/events` |
 | List | `GET /api/v1/events?collection=&label=&owner=&limit=&cursor=` |
 | Fetch | `GET /api/v1/events/{id}` |
+| Delete | `POST /api/v1/events/delete` (owner-signed) |
 | Stream | `GET /api/v1/events/stream` (SSE) |
 | Upload | `PUT /api/v1/blobs` |
 | Download | `GET /api/v1/blobs/{hash}` |
@@ -124,7 +126,7 @@ No. Rabta is an event relay. It stores opaque, signed envelopes in SQLite. Your 
 No. One container, one SQLite file, blobs on local disk. That's the whole stack.
 
 **How does authentication work?**
-It doesn't — by design. Identity is cryptographic (Ed25519). For access control, add an authenticated reverse proxy.
+It doesn't — by design. Identity is cryptographic (Ed25519). Publishing verifies the envelope signature; deletion verifies a separate owner signature. For access control, add an authenticated reverse proxy.
 
 **What happens when storage fills up?**
 Events are evicted first (largest footprint first), then claimed blobs. Pinned (`WHITELIST_PUBKEYS`) data is never evicted; writes get `507 at_watermark` instead. See `/api/v1/stats`.
@@ -135,7 +137,7 @@ Rabta is zero-knowledge in practice: no accounts, no app logic, no plaintext. It
 
 ## Project status
 
-Rabta is under active development (`0.0.1-dev`). The API is deliberately small and focused. Issues and PRs are welcome.
+Rabta is under active development (`0.0.1`). The API is deliberately small and focused. Issues and PRs are welcome.
 
 If Rabta saves you from building a backend, a ⭐ helps other builders discover it.
 

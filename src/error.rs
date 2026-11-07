@@ -48,6 +48,12 @@ impl ApiError {
             "owner must be `ed25519:<64-hex pubkey>`",
         )
     }
+    pub fn bad_targets(msg: impl Into<String>) -> ApiError {
+        ApiError::new(StatusCode::BAD_REQUEST, "bad_targets", msg)
+    }
+    pub fn forbidden(msg: impl Into<String>) -> ApiError {
+        ApiError::new(StatusCode::FORBIDDEN, "forbidden", msg)
+    }
     pub fn ttl_range(msg: impl Into<String>) -> ApiError {
         ApiError::new(StatusCode::BAD_REQUEST, "ttl_range", msg)
     }

@@ -1,9 +1,12 @@
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::canon::digest_value;
-use crate::db::{MAX_BIN_REFS, MAX_ENVELOPE, MAX_TTL_SECONDS, MIN_TTL_SECONDS};
+use crate::db::{
+    MAX_BIN_REFS, MAX_DELETE_BODY, MAX_DELETE_TARGETS, MAX_ENVELOPE, MAX_TTL_SECONDS,
+    MIN_TTL_SECONDS,
+};
 use crate::error::{ApiError, ApiResult};
 
 /// Verified event — Clone so the async write transaction can own a copy.
@@ -245,6 +248,107 @@ fn verify_sig(digest: [u8; 32], sig: [u8; 64], vk: &VerifyingKey) -> ApiResult<(
 
 fn get_str<'a>(obj: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a str> {
     obj.get(key).and_then(Value::as_str)
+}
+
+/// A verified owner-signed deletion request. The digest input is
+/// `{action:"delete", created_at, owner, targets}` with lowercase hex, sorted
+/// keys, and compact separators. Signing the action string domain-separates a
+/// delete request from an event envelope.
+pub struct DeleteRequest {
+    pub owner: [u8; 32],
+    pub targets: Vec<[u8; 32]>,
+    pub targets_hex: Vec<String>,
+}
+
+pub fn parse_delete_request(body: &[u8], now: i64) -> ApiResult<DeleteRequest> {
+    if body.len() > MAX_DELETE_BODY {
+        return Err(ApiError::too_large(format!(
+            "delete request exceeds {MAX_DELETE_BODY} bytes"
+        )));
+    }
+    let v: Value = serde_json::from_slice(body)
+        .map_err(|e| ApiError::bad_json(format!("delete request is not valid JSON: {e}")))?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| ApiError::bad_json("delete request must be a JSON object"))?;
+
+    let owner_str = get_str(obj, "owner").ok_or_else(ApiError::bad_owner)?;
+    let Some(owner_hex_part) = owner_str.strip_prefix("ed25519:") else {
+        return Err(ApiError::bad_owner());
+    };
+    if owner_hex_part.len() != 64 || !is_hex(owner_hex_part) {
+        return Err(ApiError::bad_owner());
+    }
+    let owner_bytes = hex::decode(owner_hex_part).expect("checked hex");
+    let owner: [u8; 32] = owner_bytes.try_into().unwrap();
+    let vk = VerifyingKey::from_bytes(&owner)
+        .map_err(|_| ApiError::bad_sig("owner is not a valid ed25519 public key"))?;
+    let owner_canon = format!("ed25519:{}", owner_hex_part.to_ascii_lowercase());
+
+    let created_at = obj
+        .get("created_at")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| ApiError::bad_json("created_at must be an integer (unix seconds)"))?;
+    if created_at > now {
+        return Err(ApiError::bad_json("created_at must not be in the future"));
+    }
+
+    let targets_raw = obj
+        .get("targets")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ApiError::bad_targets("targets must be an array of event ids"))?;
+    if targets_raw.is_empty() {
+        return Err(ApiError::bad_targets("targets must not be empty"));
+    }
+    if targets_raw.len() > MAX_DELETE_TARGETS {
+        return Err(ApiError::bad_targets(format!(
+            "more than {MAX_DELETE_TARGETS} targets"
+        )));
+    }
+
+    let mut targets = Vec::with_capacity(targets_raw.len());
+    let mut targets_hex = Vec::with_capacity(targets_raw.len());
+    let mut seen = std::collections::HashSet::with_capacity(targets_raw.len());
+    for item in targets_raw {
+        let Some(s) = item.as_str() else {
+            return Err(ApiError::bad_targets("targets must be an array of strings"));
+        };
+        if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(ApiError::bad_targets(format!(
+                "target `{s}` must be 64 hex characters"
+            )));
+        }
+        let lower = s.to_ascii_lowercase();
+        if !seen.insert(lower.clone()) {
+            return Err(ApiError::bad_targets(format!("duplicate target `{lower}`")));
+        }
+        let raw = hex::decode(&lower).expect("checked hex");
+        targets.push(raw.try_into().expect("32-byte event id"));
+        targets_hex.push(lower);
+    }
+
+    let sig_hex =
+        get_str(obj, "sig").ok_or_else(|| ApiError::bad_sig("delete request has no sig"))?;
+    if sig_hex.len() != 128 || !is_hex(sig_hex) {
+        return Err(ApiError::bad_sig("sig must be 128 hex characters"));
+    }
+    let sig_bytes = hex::decode(sig_hex).expect("checked hex");
+    let sig: [u8; 64] = sig_bytes.try_into().unwrap();
+
+    let digest_input = json!({
+        "action": "delete",
+        "created_at": created_at,
+        "owner": owner_canon,
+        "targets": targets_hex,
+    });
+    let digest: [u8; 32] = Sha256::digest(crate::canon::canonical_value(&digest_input)).into();
+    verify_sig(digest, sig, &vk)?;
+
+    Ok(DeleteRequest {
+        owner,
+        targets,
+        targets_hex,
+    })
 }
 
 /// Bytes that a new event would add to the combined budget by claiming
@@ -779,6 +883,73 @@ mod tests {
             Err(e) => e,
         };
         assert_eq!(err.code, "bad_bin", "unexpected error: {}", err.message);
+    }
+
+    fn signed_delete(
+        key: &ed25519_dalek::SigningKey,
+        targets: &[String],
+        created_at: i64,
+    ) -> Vec<u8> {
+        use ed25519_dalek::Signer;
+        use sha2::{Digest, Sha256};
+
+        let owner = format!("ed25519:{}", hex::encode(key.verifying_key().to_bytes()));
+        let targets: Vec<String> = targets.iter().map(|t| t.to_ascii_lowercase()).collect();
+        let digest_input = serde_json::json!({
+            "action": "delete",
+            "created_at": created_at,
+            "owner": owner,
+            "targets": targets,
+        });
+        let digest: [u8; 32] = Sha256::digest(crate::canon::canonical_value(&digest_input)).into();
+        let sig = key.sign(&digest);
+        serde_json::to_vec(&serde_json::json!({
+            "owner": owner,
+            "targets": targets,
+            "created_at": created_at,
+            "sig": hex::encode(sig.to_bytes()),
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn delete_request_verifies_and_normalizes() {
+        use ed25519_dalek::SigningKey;
+
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let targets = vec!["ab".repeat(32), "CD".repeat(32)];
+        let now = 1_700_000_000;
+        let body = signed_delete(&key, &targets, now);
+        let req = parse_delete_request(&body, now).unwrap();
+
+        assert_eq!(req.owner, key.verifying_key().to_bytes());
+        assert_eq!(req.targets, vec![[0xab; 32], [0xcd; 32]]);
+        assert_eq!(req.targets_hex, vec!["ab".repeat(32), "cd".repeat(32)]);
+    }
+
+    #[test]
+    fn delete_request_rejects_duplicates_and_bad_signature() {
+        use ed25519_dalek::SigningKey;
+
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let target = "ab".repeat(32);
+        let now = 1_700_000_000;
+
+        let dup = signed_delete(&key, &[target.clone(), target.clone()], now);
+        let err = parse_delete_request(&dup, now)
+            .err()
+            .expect("duplicate accepted");
+        assert_eq!(err.code, "bad_targets");
+
+        let bad = signed_delete(&key, std::slice::from_ref(&target), now);
+        let text = String::from_utf8(bad).unwrap();
+        let sig_at = text.find("\"sig\":\"").unwrap() + "\"sig\":\"".len();
+        let mut bytes = text.into_bytes();
+        bytes[sig_at] = if bytes[sig_at] == b'0' { b'1' } else { b'0' };
+        let err = parse_delete_request(&bytes, now)
+            .err()
+            .expect("bad sig accepted");
+        assert_eq!(err.code, "bad_sig");
     }
 
     #[test]

@@ -21,6 +21,8 @@ pub const OPENAPI: &str = "/openapi.json";
 pub const EVENTS: &str = "/events";
 /// Live event stream (SSE).
 pub const EVENT_STREAM: &str = "/events/stream";
+/// Owner-signed deletion of stored events.
+pub const EVENT_DELETE: &str = "/events/delete";
 /// One event by its 64-hex id.
 pub const EVENT_BY_ID: &str = "/events/{id}";
 /// Size metadata for one event.

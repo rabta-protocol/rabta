@@ -17,6 +17,18 @@ pub struct Db {
     readers: Arc<ReaderPool>,
     /// Wakes the shared SSE feed after a committed event insert.
     events_changed: Arc<tokio::sync::Notify>,
+    /// Live notification of committed deletions. Not replayed on resume.
+    deletions: tokio::sync::broadcast::Sender<Arc<DeletedEvent>>,
+}
+
+/// Metadata for one committed owner-signed deletion, broadcast to live SSE
+/// subscribers so they can drop a local copy.
+#[derive(Debug, Clone)]
+pub struct DeletedEvent {
+    pub id_hex: String,
+    pub collection: String,
+    pub owner: Vec<u8>,
+    pub labels: Vec<String>,
 }
 
 /// A pool of read-only SQLite connections. It starts small and opens extra
@@ -124,6 +136,10 @@ impl Drop for ReaderGuard {
 }
 
 pub const MAX_ENVELOPE: usize = 100_000;
+/// Most event ids one signed deletion request may target.
+pub const MAX_DELETE_TARGETS: usize = 100;
+/// Hard cap on a signed deletion request body.
+pub const MAX_DELETE_BODY: usize = 16_384;
 /// Optional blob references an event may carry. A live event that lists a
 /// blob keeps it until the event's own expiry; validation still never
 /// requires the blob to exist.
@@ -165,10 +181,12 @@ impl Db {
             readers.push(open_reader(&path).expect("cannot open read connection"));
         }
 
+        let (deletions, _) = tokio::sync::broadcast::channel(1024);
         Db {
             writer: Arc::new(Mutex::new(c)),
             readers: Arc::new(ReaderPool::new(path, readers)),
             events_changed: Arc::new(tokio::sync::Notify::new()),
+            deletions,
         }
     }
 
@@ -187,6 +205,18 @@ impl Db {
     /// Resolve on the next event-row signal (or immediately if one is queued).
     pub async fn wait_for_event_row(&self) {
         self.events_changed.notified().await;
+    }
+
+    /// Subscribe to live deletion notices. Only deletions committed after this
+    /// call are delivered; resuming an SSE stream does not replay them.
+    pub fn subscribe_deletions(&self) -> tokio::sync::broadcast::Receiver<Arc<DeletedEvent>> {
+        self.deletions.subscribe()
+    }
+
+    /// Broadcast a committed deletion to live SSE subscribers. Best effort: no
+    /// subscribers is not an error.
+    pub fn notify_deletion(&self, ev: DeletedEvent) {
+        let _ = self.deletions.send(Arc::new(ev));
     }
 
     /// Run a closure against the single writer connection inside a blocking

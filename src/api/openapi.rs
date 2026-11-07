@@ -167,6 +167,32 @@ pub fn spec() -> Value {
     );
 
     paths.insert(
+        routes::EVENT_DELETE.to_string(),
+        json!({
+            "post": {
+                "tags": ["events"],
+                "operationId": "deleteEvents",
+                "summary": "Delete stored events with an owner signature",
+                "description": "Deletes up to 100 event ids owned by the signing key in one transaction. The digest input is canonical `{action:\"delete\",created_at,owner,targets}`; owner and targets are lowercased before hashing. Missing or expired targets are reported in `not_found`; a target owned by another key fails the whole request with 403. Live SSE subscribers receive an `event: delete` frame; resuming does not replay deletions.",
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {"schema": schema_ref("DeleteRequest")}
+                    }
+                },
+                "responses": {
+                    "200": json_response("Deletion result. Already-missing ids appear in `not_found`.", schema_ref("DeleteResponse")),
+                    "400": error_response("Malformed JSON, owner, or targets (`bad_json`, `bad_owner`, `bad_targets`)."),
+                    "401": error_response("The signature does not verify (`bad_sig`)."),
+                    "403": error_response("At least one target is owned by another key (`forbidden`); nothing was deleted."),
+                    "413": error_response("The request exceeds 16,384 bytes (`too_large`)."),
+                    "500": error_response("Storage failure (`internal`).")
+                }
+            }
+        }),
+    );
+
+    paths.insert(
         routes::EVENT_BY_ID.to_string(),
         json!({
             "get": {
@@ -643,6 +669,48 @@ pub fn spec() -> Value {
                     },
                     "additionalProperties": false
                 },
+                "DeleteRequest": {
+                    "type": "object",
+                    "required": ["owner", "targets", "created_at", "sig"],
+                    "properties": {
+                        "owner": schema_ref("Owner"),
+                        "targets": {
+                            "type": "array",
+                            "description": "Event ids to delete. The signer must own every target.",
+                            "minItems": 1,
+                            "maxItems": 100,
+                            "uniqueItems": true,
+                            "items": schema_ref("EventId")
+                        },
+                        "created_at": {
+                            "type": "integer",
+                            "format": "int64",
+                            "description": "Unix seconds. Must not be in the server's future."
+                        },
+                        "sig": {
+                            "type": "string",
+                            "description": "Ed25519 signature over SHA-256 of canonical `{action:\"delete\",created_at,owner,targets}`.",
+                            "pattern": "^[0-9a-fA-F]{128}$"
+                        }
+                    },
+                    "additionalProperties": true
+                },
+                "DeleteResponse": {
+                    "type": "object",
+                    "required": ["deleted", "not_found"],
+                    "properties": {
+                        "deleted": {
+                            "type": "array",
+                            "items": schema_ref("EventId")
+                        },
+                        "not_found": {
+                            "type": "array",
+                            "description": "Targets that were already missing or expired.",
+                            "items": schema_ref("EventId")
+                        }
+                    },
+                    "additionalProperties": false
+                },
                 "EventList": {
                     "type": "object",
                     "required": ["count", "events", "next_cursor"],
@@ -1023,6 +1091,7 @@ mod tests {
             routes::STATS,
             routes::EVENTS,
             routes::EVENT_STREAM,
+            routes::EVENT_DELETE,
             routes::EVENT_BY_ID,
             routes::EVENT_SIZE,
             routes::BLOBS,

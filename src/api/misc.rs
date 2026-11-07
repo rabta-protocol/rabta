@@ -37,6 +37,10 @@ pub async fn index(State(n): State<AppState>) -> Json<serde_json::Value> {
         json!("SSE (Last-Event-ID resume)"),
     );
     endpoints.insert(
+        endpoint("POST", routes::EVENT_DELETE),
+        json!("owner-signed deletion of stored events"),
+    );
+    endpoints.insert(
         endpoint("GET", routes::EVENT_BY_ID),
         json!("fetch one (ETag / If-None-Match)"),
     );

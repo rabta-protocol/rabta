@@ -22,6 +22,7 @@ New to Rabta? Start with the [README](README.md) for the one-container quick sta
   - [`GET /api/v1/events/{id}`](#get-apiv1eventsid)
   - [`GET /api/v1/events/{id}/size`](#get-apiv1eventsidsize)
   - [`GET /api/v1/events/stream`](#get-apiv1eventsstream)
+  - [`POST /api/v1/events/delete`](#post-apiv1eventsdelete)
   - [`PUT /api/v1/blobs`](#put-apiv1blobs)
   - [`GET /api/v1/blobs/{hash}`](#get-apiv1blobshash)
   - [`HEAD /api/v1/blobs/{hash}`](#head-apiv1blobshash)
@@ -31,11 +32,12 @@ New to Rabta? Start with the [README](README.md) for the one-container quick sta
 
 ## Relay model
 
-Rabta is an event relay — signed immutable events, a pubkey identity, an append-only sequence, live delivery.
+Rabta is an event relay — signed events, a pubkey identity, a monotonic sequence, live delivery, and owner-authorized deletion.
 
 - **Transport:** HTTP + JSON + SSE.
 - **Signatures:** Ed25519 over a canonical Rabta object.
 - **Model:** opaque `data`, `collection` plus up to 10 `labels`, mandatory TTL.
+- **Deletion:** the owner key can hard-delete its events with a signed request. Live SSE subscribers receive a delete notice.
 - **Attachments:** raw uploads are stored on the node's own disk, addressed by SHA-256. An unclaimed blob lives 48 hours; a blob named in a live event's `bin` expires with that event.
 
 ## Conventions
@@ -48,13 +50,13 @@ Rabta is an event relay — signed immutable events, a pubkey identity, an appen
 | Event IDs | 64 lowercase hex characters = SHA-256 of the canonical envelope fields. |
 | Blob identity | 64 lowercase hex characters = SHA-256 of the raw body. |
 | Hex input | Accepted case-insensitively; responses and stored IDs are lowercase. |
-| Authentication | None. Every route is unauthenticated. |
+| Authentication | None (no accounts). Publishing verifies the envelope signature; deletion verifies a separate owner signature. |
 | CORS | Permissive (`Access-Control-Allow-Origin: *`, all methods/headers). |
 | Versioning | No URL version prefix. |
 | Event delivery | Signed events over HTTP + JSON + SSE. See [Relay model](#relay-model). |
 | HTML | None. A UI is a separate static app that calls the node. |
 
-Because there is no authentication, anyone who can reach the node can publish events and upload blobs. The `owner` field is a cryptographic identity, not an access-control check. Put the node behind TLS and an authenticating reverse proxy if it is exposed to the internet.
+Because there are no accounts, anyone who can reach the node can publish events and upload blobs under a key they control. The `owner` field is a cryptographic identity, not a gate on who may write. Deleting an event is different: it requires a signature from that event's owner key. Put the node behind TLS and an authenticating reverse proxy if it is exposed to the internet.
 
 ## Errors
 
@@ -76,9 +78,11 @@ The HTTP status and `code` identify the class of failure:
 | `bad_collection` | 400 | `collection` does not match `^[a-z0-9/_-]{1,32}$`. |
 | `bad_label` | 400 | Invalid envelope label, or empty/duplicate label filter. |
 | `bad_bin` | 400 | `bin` is not an array of 1–8 unique 64-char lowercase hex hashes. |
-| `bad_owner` | 400 | `owner` filter is not `ed25519:<64 hex>`. |
+| `bad_owner` | 400 | `owner` is not `ed25519:<64 hex>`. |
+| `bad_targets` | 400 | A deletion request has an empty, oversized, duplicate, or malformed target list. |
 | `ttl_range` | 400 | Timestamp or TTL outside the allowed window. |
-| `too_large` | 413 | Event body exceeds 100,000 bytes, or a blob exceeds 1% of `STORAGE_LIMIT`. |
+| `too_large` | 413 | Event body exceeds 100,000 bytes, deletion body exceeds 16,384 bytes, or a blob exceeds 1% of `STORAGE_LIMIT`. |
+| `forbidden` | 403 | A deletion request targets an event owned by another key. Nothing was deleted. |
 | `empty_body` | 400 | Blob upload body is empty. |
 | `bad_body` | 400 | The blob upload stream failed partway through the body. |
 | `at_watermark` | 507 | Storage admission watermark reached; write refused. |
@@ -110,9 +114,9 @@ The server does **not**:
 - generate or hold user keys;
 - encrypt or decrypt `data` or blobs;
 - sign events on behalf of clients;
-- enforce per-owner read/write permissions.
+- restrict who may publish or read; deletion is the only operation checked against an existing owner.
 
-Authenticity comes from the client signature. Confidentiality, if you need it, comes from client-side encryption of `data` and blob bodies.
+Deletion is authorized by the owner key's signature over the target list. Authenticity comes from the client signature. Confidentiality, if you need it, comes from client-side encryption of `data` and blob bodies.
 
 ### Envelope fields
 
@@ -277,7 +281,7 @@ Minimal JSON route index. Includes the service version, API version, base path, 
 ```json
 {
   "service": "rabta",
-  "version": "0.0.1-dev",
+  "version": "0.0.1",
   "api_version": "v1",
   "base_path": "/api/v1",
   "description": "signed-event relay with local content-addressed blobs",
@@ -288,6 +292,7 @@ Minimal JSON route index. Includes the service version, API version, base path, 
     "POST /api/v1/events": "publish a signed envelope (application/json)",
     "GET /api/v1/events": "list (collection, label*, owner, limit, cursor)",
     "GET /api/v1/events/stream": "SSE (Last-Event-ID resume)",
+    "POST /api/v1/events/delete": "owner-signed deletion of stored events",
     "GET /api/v1/events/{id}": "fetch one (ETag / If-None-Match)",
     "GET /api/v1/events/{id}/size": "envelope size + attached blob bytes",
     "PUT /api/v1/blobs": "raw blob upload; identity is the sha256 of the body",
@@ -368,7 +373,7 @@ JSON monitoring snapshot. No dashboard.
   },
   "sse": {"subscribers": 1, "cap": 256},
   "uptime_s": 3600,
-  "version": "0.0.1-dev"
+  "version": "0.0.1"
 }
 ```
 
@@ -539,6 +544,88 @@ data: {"collection":"chat/room-42","created_at":1793283000,"data":{"ciphertext":
 - The default subscriber cap is 256; when full, the request fails with `503 subscriber_cap` before the stream starts.
 - Disconnects release the subscriber slot automatically.
 
+**Deletion notices**
+
+A live stream with matching filters also receives an `event: delete` frame when an event is deleted through [`POST /api/v1/events/delete`](#post-apiv1eventsdelete):
+
+```text
+event: delete
+data: {"id":"8772dfa8666479735bb645fef058327f62c12378991fb65f309ed1d0929b824a"}
+
+```
+
+- The frame carries only the deleted event ID; clients drop their local copy.
+- There is no `id:` line, so a deletion never moves the `Last-Event-ID` cursor.
+- Deletions are live-only. A reconnect does not replay them, and an event deleted while a client was offline simply stops appearing in lists and fetches.
+- Filters apply exactly as for `message` frames: collection, every requested label, and owner.
+
+### `POST /api/v1/events/delete`
+
+Hard-delete up to 100 events owned by the signing key in one atomic request. There is no separate checksum or tombstone route.
+
+```bash
+curl -X POST http://localhost:3232/api/v1/events/delete \
+  -H 'content-type: application/json' \
+  --data-binary @delete.json
+```
+
+**Request**
+
+```json
+{
+  "owner": "ed25519:ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+  "targets": [
+    "8772dfa8666479735bb645fef058327f62c12378991fb65f309ed1d0929b824a"
+  ],
+  "created_at": 1793283000,
+  "sig": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a089f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+}
+```
+
+- Body: one JSON object, at most **16,384 bytes**.
+- `owner`: `ed25519:<64 hex>` of the key that signed the targets.
+- `targets`: 1–100 unique event IDs, 64 hex characters each. Duplicates are rejected, not collapsed.
+- `created_at`: Unix seconds, integer, not in the server's future.
+- `sig`: 128 hex characters, Ed25519 over the digest described below.
+
+**Signed digest**
+
+The digest input is canonical JSON — sorted keys, compact separators, no whitespace:
+
+```text
+{"action":"delete","created_at":1793283000,"owner":"ed25519:ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","targets":["8772dfa8666479735bb645fef058327f62c12378991fb65f309ed1d0929b824a"]}
+```
+
+`owner` and every target are lowercased before hashing. The node computes SHA-256 over those exact bytes, then verifies the Ed25519 signature over the 32-byte digest. The literal `action: "delete"` domain-separates a deletion from an event envelope, so a signature for one can never authorize the other.
+
+**Response**
+
+```json
+{
+  "deleted": ["8772dfa8666479735bb645fef058327f62c12378991fb65f309ed1d0929b824a"],
+  "not_found": []
+}
+```
+
+- `200 OK` with both lists, each preserving the request order.
+- Missing, expired, or already-deleted targets go to `not_found`; the request still succeeds. A retry is therefore idempotent.
+- All-or-nothing: if any live target is owned by another key, the whole request returns `403 forbidden` and nothing is deleted.
+- Deletion is immediate and hard: the event row, its labels, and its blob references are removed in one transaction.
+- Blobs that lose their last live reference become unclaimed. They expire 48 hours after their original upload — a deadline that may already have passed — and are then reclaimed by the reaper. Reads do not extend it.
+- Live SSE subscribers with matching filters receive the `event: delete` frame described above.
+
+**Errors**
+
+| `code` | Status | When |
+| --- | --- | --- |
+| `bad_json` | 400 | Malformed JSON, or `created_at` missing, non-integer, or in the future. |
+| `bad_owner` | 400 | `owner` is not `ed25519:<64 hex>`. |
+| `bad_targets` | 400 | `targets` is missing, empty, over 100, duplicated, or not an array of 64-hex IDs. |
+| `bad_sig` | 401 | `sig` is malformed or does not verify against the canonical digest. |
+| `forbidden` | 403 | A live target belongs to another key; nothing was deleted. |
+| `too_large` | 413 | The request body exceeds 16,384 bytes. |
+| `internal` | 500 | Storage failure; the transaction was rolled back. |
+
 ### `PUT /api/v1/blobs`
 
 Upload raw bytes. The node derives the identity from the body; there is no filename, extension, or multipart form.
@@ -606,6 +693,7 @@ Blobs are stored locally:
 | `PUT /api/v1/blobs` | Streams the body to a temp file, hashes it, installs it at `/data/blobs/ab/<hash>`, and returns the hash. |
 | Same bytes uploaded again | Deduplicated; no new bytes; access metadata refreshed; deadline unchanged. |
 | Read | Serves bytes with Range/ETag and records the access (throttled). Deadline unchanged. |
+| Event deleted | The event's labels and `blob_refs` rows are removed. A blob with no remaining live reference becomes unclaimed and expires 48 hours after its original upload — a deadline that may already have passed. |
 | Disk pressure | Events leave first, largest total footprint first (envelope plus blobs only that event claims), which may unclaim their blobs; then claimed blobs, down to the 85% target. Unclaimed blobs are not pressure-evicted. |
 | Pinned claim | A blob referenced by any live event from a `WHITELIST_PUBKEYS` owner is never a pressure victim, even if an unprotected event also references it. |
 | Retention | Unclaimed: 48 hours from upload. Claimed: latest expiry of the live events listing it. Reclaimed by the reaper. |
@@ -626,6 +714,8 @@ If the configured budget exceeds 90% of free disk at boot, it is clamped to 90%.
 | --- | --- |
 | Event envelope | 100,000 bytes |
 | Event TTL | > 60 seconds and ≤ 10 years (3650 days) |
+| Deletion request body | 16,384 bytes |
+| Deletion targets | 1–100 unique event IDs per request |
 | Labels per event | 10 |
 | Public event list page | 1–100 (default 20) |
 | Single blob | 1% of effective `STORAGE_LIMIT` |
@@ -708,6 +798,44 @@ const response = await fetch('http://localhost:3232/api/v1/events', {
 });
 console.log(await response.json());
 ```
+
+### Delete events with Node.js
+
+Sign the deletion digest with the same owner key. Lowercase the owner and every target before canonicalizing; the node verifies exactly those bytes.
+
+```js
+import { createHash, sign } from 'node:crypto';
+
+// `privateKey`, `owner`, and `canonical` come from the publish example.
+const targets = [
+  '8772dfa8666479735bb645fef058327f62c12378991fb65f309ed1d0929b824a',
+].map((id) => id.toLowerCase());
+
+const digestInput = {
+  action: 'delete',
+  created_at: Math.floor(Date.now() / 1000),
+  owner: owner.toLowerCase(),
+  targets,
+};
+
+const digest = createHash('sha256').update(canonical(digestInput)).digest();
+const request = {
+  owner: digestInput.owner,
+  targets: digestInput.targets,
+  created_at: digestInput.created_at,
+  sig: sign(null, digest, privateKey).toString('hex'),
+};
+
+const response = await fetch('http://localhost:3232/api/v1/events/delete', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify(request),
+});
+console.log(await response.json());
+// {"deleted":["8772dfa8..."],"not_found":[]}
+```
+
+`owner.toLowerCase()` leaves the `ed25519:` prefix unchanged. A target owned by another key fails the whole request with `403 forbidden`.
 
 ### Upload and fetch a blob
 

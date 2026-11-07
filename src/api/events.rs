@@ -6,6 +6,7 @@ use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use rusqlite::OptionalExtension;
 use serde_json::json;
 
 use super::{AppState, SSE_ACTIVE};
@@ -97,6 +98,95 @@ async fn insert_event(n: &AppState, ev: &events::ParsedEvent) -> ApiResult<bool>
         })
         .await;
     out
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/events/delete — owner-signed deletion
+// ---------------------------------------------------------------------------
+
+pub async fn delete(State(n): State<AppState>, req: Request<Body>) -> Response {
+    let bytes = match read_body_capped(req, crate::db::MAX_DELETE_BODY).await {
+        Ok(b) => b.to_vec(),
+        Err(e) => return e.into_response(),
+    };
+    run(delete_request(n, bytes).await)
+}
+
+async fn delete_request(n: AppState, bytes: Vec<u8>) -> ApiResult<Response> {
+    let now = reaper::now();
+    let req = events::parse_delete_request(&bytes, now)?;
+    let (deleted, not_found, notices) = delete_owned(&n, req, now).await?;
+    for notice in notices {
+        n.db.notify_deletion(notice);
+    }
+    Ok((
+        StatusCode::OK,
+        Json(json!({"deleted": deleted, "not_found": not_found})),
+    )
+        .into_response())
+}
+
+type DeleteOutcome = (Vec<String>, Vec<String>, Vec<crate::db::DeletedEvent>);
+
+/// All-or-nothing: a single foreign target aborts the whole request before any
+/// row is removed. Missing or expired targets are reported, not fatal, so a
+/// retry after a partial client-side failure stays idempotent.
+async fn delete_owned(
+    n: &AppState,
+    req: events::DeleteRequest,
+    now: i64,
+) -> ApiResult<DeleteOutcome> {
+    let db = n.db.clone();
+    db.write(move |c: &Connection| -> ApiResult<DeleteOutcome> {
+        let tx = c
+            .unchecked_transaction()
+            .map_err(|e| ApiError::internal(format!("delete begin: {e}")))?;
+        let mut ids = Vec::with_capacity(req.targets.len());
+        let mut deleted = Vec::with_capacity(req.targets.len());
+        let mut not_found = Vec::new();
+        let mut notices = Vec::with_capacity(req.targets.len());
+
+        for (id, id_hex) in req.targets.iter().zip(req.targets_hex.iter()) {
+            let row: Option<(Vec<u8>, String, String)> = tx
+                .query_row(
+                    "SELECT owner, collection, labels FROM events
+                         WHERE id = ?1 AND state = 'live' AND expires_at > ?2",
+                    rusqlite::params![&id[..], now],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()
+                .map_err(|e| ApiError::internal(format!("delete lookup: {e}")))?;
+
+            match row {
+                Some((owner, collection, labels_json)) => {
+                    if owner.as_slice() != req.owner.as_slice() {
+                        return Err(ApiError::forbidden(format!(
+                            "target `{id_hex}` is owned by another key"
+                        )));
+                    }
+                    let labels = serde_json::from_str(&labels_json).unwrap_or_default();
+                    ids.push(*id);
+                    deleted.push(id_hex.clone());
+                    notices.push(crate::db::DeletedEvent {
+                        id_hex: id_hex.clone(),
+                        collection,
+                        owner,
+                        labels,
+                    });
+                }
+                None => not_found.push(id_hex.clone()),
+            }
+        }
+
+        if !ids.is_empty() {
+            events::delete_events(&tx, &ids)
+                .map_err(|e| ApiError::internal(format!("event delete: {e}")))?;
+        }
+        tx.commit()
+            .map_err(|e| ApiError::internal(format!("delete commit: {e}")))?;
+        Ok((deleted, not_found, notices))
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -567,6 +657,37 @@ fn sse_frame(seq: i64, served: &[u8]) -> axum::body::Bytes {
     ))
 }
 
+fn delete_matches(filters: &ListFilters, notice: &crate::db::DeletedEvent) -> bool {
+    if let Some(collection) = &filters.collection
+        && &notice.collection != collection
+    {
+        return false;
+    }
+    if let Some(owner) = &filters.owner_hex {
+        let Ok(owner) = hex::decode(owner) else {
+            return false;
+        };
+        if notice.owner != owner {
+            return false;
+        }
+    }
+    if !filters.labels.is_empty()
+        && !filters
+            .labels
+            .iter()
+            .all(|label| notice.labels.contains(label))
+    {
+        return false;
+    }
+    true
+}
+
+/// Live-only deletion notice. No `id:` line: deletions are not replayed on
+/// `Last-Event-ID` resume, so they must not move the client's cursor.
+fn delete_frame(id_hex: &str) -> axum::body::Bytes {
+    axum::body::Bytes::from(format!("event: delete\ndata: {{\"id\":\"{id_hex}\"}}\n\n"))
+}
+
 /// Fetch the filtered backlog in sequence order. The returned cursor is the
 /// high-water mark, not just the last matching row, so missed filtered rows
 /// are never rescanned.
@@ -652,6 +773,9 @@ async fn stream_inner(n: AppState, headers: HeaderMap, p: RawQ) -> ApiResult<Res
 
     let (tx, rx) = mpsc::channel::<Result<axum::body::Bytes, axum::Error>>(32);
     let db = n.db.clone();
+    // Subscribe before returning the response so no deletion committed after
+    // the client connects can slip between the handler and the worker.
+    let mut deletions = db.subscribe_deletions();
     let mut shutdown = n.shutdown.clone();
 
     tokio::spawn(async move {
@@ -666,6 +790,7 @@ async fn stream_inner(n: AppState, headers: HeaderMap, p: RawQ) -> ApiResult<Res
         // Subscribe before taking the high-water mark. Rows committed while
         // the backlog is fetched are then either in that backlog or queued.
         let mut feed = ensure_sse_feed(&db, shutdown.clone()).await;
+        let mut deletions_open = true;
         let high_water = db
             .read(|c: &Connection| {
                 c.query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |r| r.get(0))
@@ -743,6 +868,23 @@ async fn stream_inner(n: AppState, headers: HeaderMap, p: RawQ) -> ApiResult<Res
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    }
+                }
+                received = deletions.recv(), if deletions_open => {
+                    match received {
+                        Ok(notice) => {
+                            if delete_matches(&filters, &notice)
+                                && tx.send(Ok(delete_frame(&notice.id_hex))).await.is_err()
+                            {
+                                return;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::debug!(skipped, "sse deletion subscriber lagged");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            deletions_open = false;
+                        }
                     }
                 }
                 _ = keepalive.tick() => {
@@ -986,6 +1128,234 @@ mod tests {
         assert!(end.is_none(), "stream produced a frame after shutdown");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn signed_event(
+        key: &SigningKey,
+        collection: &str,
+        data: serde_json::Value,
+        created_at: i64,
+        expires_at: i64,
+    ) -> (String, Vec<u8>) {
+        let owner = format!("ed25519:{}", hex::encode(key.verifying_key().to_bytes()));
+        let canonical = crate::canon::digest_value(
+            collection,
+            created_at,
+            expires_at,
+            &owner,
+            &[],
+            &data,
+            None,
+        );
+        let digest: [u8; 32] = Sha256::digest(crate::canon::canonical_value(&canonical)).into();
+        let sig = key.sign(&digest);
+        let envelope = json!({
+            "collection": collection,
+            "created_at": created_at,
+            "data": data,
+            "expires_at": expires_at,
+            "labels": [],
+            "owner": owner,
+            "id": hex::encode(digest),
+            "sig": hex::encode(sig.to_bytes()),
+        });
+        (hex::encode(digest), serde_json::to_vec(&envelope).unwrap())
+    }
+
+    fn signed_delete(key: &SigningKey, targets: &[String], created_at: i64) -> Vec<u8> {
+        let owner = format!("ed25519:{}", hex::encode(key.verifying_key().to_bytes()));
+        let targets: Vec<String> = targets.iter().map(|t| t.to_ascii_lowercase()).collect();
+        let digest_input = json!({
+            "action": "delete",
+            "created_at": created_at,
+            "owner": owner,
+            "targets": targets,
+        });
+        let digest: [u8; 32] = Sha256::digest(crate::canon::canonical_value(&digest_input)).into();
+        let sig = key.sign(&digest);
+        serde_json::to_vec(&json!({
+            "owner": owner,
+            "targets": targets,
+            "created_at": created_at,
+            "sig": hex::encode(sig.to_bytes()),
+        }))
+        .unwrap()
+    }
+
+    async fn event_count(n: &AppState) -> i64 {
+        n.db.read(|c: &Connection| {
+            c.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+                .unwrap()
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn signed_delete_removes_owned_events_and_reports_missing() {
+        let dir = temp_dir("event-delete-owned");
+        let n = test_state(&dir);
+        let now = reaper::now();
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+
+        let (id1, body1) = signed_event(&key, "chat", json!({"n": 1}), now - 10, now + 3600);
+        let (_, body2) = signed_event(&key, "chat", json!({"n": 2}), now - 9, now + 3600);
+        publish_envelope(n.clone(), body1).await.unwrap();
+        publish_envelope(n.clone(), body2).await.unwrap();
+        assert_eq!(event_count(&n).await, 2);
+
+        let missing = "a".repeat(64);
+        let req = signed_delete(&key, &[id1.clone(), missing.clone()], now);
+        let resp = delete_request(n.clone(), req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["deleted"], json!([id1.clone()]));
+        assert_eq!(body["not_found"], json!([missing.clone()]));
+        assert_eq!(event_count(&n).await, 1);
+
+        // A retry is idempotent: the row is already gone and is reported.
+        let req = signed_delete(&key, std::slice::from_ref(&id1), now);
+        let resp = delete_request(n.clone(), req).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["deleted"], json!([]));
+        assert_eq!(body["not_found"], json!([id1]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn signed_delete_foreign_target_is_forbidden_and_atomic() {
+        let dir = temp_dir("event-delete-forbidden");
+        let n = test_state(&dir);
+        let now = reaper::now();
+        let key_a = SigningKey::from_bytes(&[7u8; 32]);
+        let key_b = SigningKey::from_bytes(&[8u8; 32]);
+
+        let (id_a, body_a) = signed_event(&key_a, "chat", json!({"a": 1}), now - 10, now + 3600);
+        let (id_b, body_b) = signed_event(&key_b, "chat", json!({"b": 1}), now - 9, now + 3600);
+        publish_envelope(n.clone(), body_a).await.unwrap();
+        publish_envelope(n.clone(), body_b).await.unwrap();
+
+        let req = signed_delete(&key_a, &[id_a.clone(), id_b], now);
+        let err = match delete_request(n.clone(), req).await {
+            Ok(_) => panic!("foreign target was accepted"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(err.code, "forbidden");
+        assert_eq!(
+            event_count(&n).await,
+            2,
+            "the request deleted a row before hitting the foreign target"
+        );
+
+        let req = signed_delete(&key_a, &[id_a], now);
+        let resp = delete_request(n.clone(), req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(event_count(&n).await, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn sse_delivers_delete_frame_for_matching_filter() {
+        use futures_util::StreamExt;
+
+        let _stream_guard = STREAM_TEST_LOCK.lock().await;
+        let dir = temp_dir("event-stream-delete");
+        let n = test_state(&dir);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", axum::http::HeaderValue::from_static("0"));
+        let resp = stream_inner(
+            n.clone(),
+            headers,
+            RawQ {
+                collection: Some("chat".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut body = resp.into_body().into_data_stream();
+
+        let id = "b".repeat(64);
+        n.db.notify_deletion(crate::db::DeletedEvent {
+            id_hex: id.clone(),
+            collection: "chat".into(),
+            owner: vec![9u8; 32],
+            labels: vec![],
+        });
+
+        let frame = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .expect("stream did not deliver the deletion")
+            .expect("event stream ended")
+            .unwrap();
+        let text = String::from_utf8_lossy(&frame);
+        assert!(text.contains("event: delete"), "unexpected frame: {text}");
+        assert!(
+            text.contains(&format!("\"id\":\"{id}\"")),
+            "unexpected frame: {text}"
+        );
+
+        drop(body);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_notice_filters_like_events() {
+        let notice = crate::db::DeletedEvent {
+            id_hex: "ab".repeat(32),
+            collection: "chat".into(),
+            owner: vec![0x11; 32],
+            labels: vec!["team".into()],
+        };
+        assert!(delete_matches(&ListFilters::default(), &notice));
+        assert!(delete_matches(
+            &ListFilters {
+                collection: Some("chat".into()),
+                ..Default::default()
+            },
+            &notice
+        ));
+        assert!(!delete_matches(
+            &ListFilters {
+                collection: Some("mail".into()),
+                ..Default::default()
+            },
+            &notice
+        ));
+        assert!(delete_matches(
+            &ListFilters {
+                owner_hex: Some(hex::encode([0x11; 32])),
+                ..Default::default()
+            },
+            &notice
+        ));
+        assert!(!delete_matches(
+            &ListFilters {
+                owner_hex: Some(hex::encode([0x22; 32])),
+                ..Default::default()
+            },
+            &notice
+        ));
+        assert!(!delete_matches(
+            &ListFilters {
+                labels: vec!["missing".into()],
+                ..Default::default()
+            },
+            &notice
+        ));
     }
 
     #[test]

@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod api;
 mod canon;
 mod config;
@@ -128,6 +130,7 @@ fn router(state: AppState) -> Router {
         .route(routes::EVENTS, post(api::events::publish).layer(big))
         .route(routes::EVENTS, get(api::events::list))
         .route(routes::EVENT_STREAM, get(api::events::stream))
+        .route(routes::EVENT_DELETE, post(api::events::delete).layer(big))
         .route(routes::EVENT_BY_ID, get(api::events::get_one))
         .route(routes::EVENT_SIZE, get(api::events::size))
         .route(routes::BLOBS, put(api::blobs_api::put).layer(big))
