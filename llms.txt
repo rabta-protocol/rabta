@@ -1,0 +1,35 @@
+# Rabta
+
+> Self-hosted backend for signed events, realtime streaming, and content-addressed file uploads. One Rust binary, one SQLite file, one Docker container. No accounts, no database server, no cloud.
+
+## Docs
+
+- [README](https://github.com/rabta-protocol/rabta/blob/main/README.md): What Rabta is, quick start, use cases, FAQ.
+- [API reference](https://github.com/rabta-protocol/rabta/blob/main/api.md): Every route, envelope format, signing, blob plane, limits, client examples.
+- [Compose stack](https://github.com/rabta-protocol/rabta/blob/main/compose.yml): Ready Portainer/Docker Compose example.
+
+## Quick Start
+
+```bash
+docker run -d --name rabta -p 3232:3232 -v rabta:/data --restart unless-stopped -e STORAGE_LIMIT=20GB ghcr.io/rabta-protocol/rabta:latest
+curl -s http://localhost:3232/api/v1/health
+```
+
+## Key Facts
+
+- Language: Rust 2024, Axum, SQLite (rusqlite bundled)
+- Container: ghcr.io/rabta-protocol/rabta:latest, linux/amd64 + linux/arm64, port 3232
+- Auth: none. Ed25519 signed events. Put behind TLS + authenticated reverse proxy for public use.
+- Events: canonical JSON sorted keys, SHA-256 id, Ed25519 sig over digest
+- Event limits: 100KB, TTL 60s to 10 years, 10 labels, collection ^[a-z0-9/_-]{1,32}$
+- Blobs: PUT /api/v1/blobs returns SHA-256. Unclaimed expire 48h. Claimed via `bin` array (1-8 hashes) expire with latest live event. Single blob max 1% of STORAGE_LIMIT.
+- Storage: STORAGE_LIMIT default 20GB covers envelopes + claimed blobs. Admission 90%, eviction target 85%. Events evicted first, largest footprint first. WHITELIST_PUBKEYS pins up to 64 keys from eviction.
+- Streaming: GET /api/v1/events/stream SSE, Last-Event-ID resume, 15s keepalive, cap 256.
+- API: POST /api/v1/events, GET /api/v1/events, GET /api/v1/events/{id}, GET /api/v1/events/stream, PUT /api/v1/blobs, GET /api/v1/blobs/{hash}
+- OpenAPI: GET /api/v1/openapi.json. Route index: GET /
+- Not Nostr: no NIPs, no WebSocket, no kinds/tags/replaceable events.
+
+## Optional
+
+- [Docker images](https://github.com/rabta-protocol/rabta/pkgs/container/rabta)
+- [Issues](https://github.com/rabta-protocol/rabta/issues)

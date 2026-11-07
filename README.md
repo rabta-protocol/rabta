@@ -1,64 +1,23 @@
 # Rabta
 
-### The self-hosted, zero-knowledge dumb relay for signed events.
+**Self-hosted backend for signed events, realtime streaming, and file uploads — in one Docker container.**
 
 [![GitHub stars](https://img.shields.io/github/stars/rabta-protocol/rabta?style=flat&logo=github)](https://github.com/rabta-protocol/rabta/stargazers)
 [![Rust](https://img.shields.io/badge/Rust-2024-000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![SQLite](https://img.shields.io/badge/SQLite-embedded-003B57?logo=sqlite&logoColor=white)](https://sqlite.org/)
 [![Docker](https://img.shields.io/badge/Docker-amd64%20%7C%20arm64-2496ED?logo=docker&logoColor=white)](https://github.com/rabta-protocol/rabta/pkgs/container/rabta)
 
-Rabta is the backend you run when you want to **ship the product, not the infrastructure**: signed events in SQLite, live changes over SSE, and automatic expiry — from one Rust binary, one SQLite file, and one container. Blobs are content-addressed by SHA-256 on local disk: unclaimed ones live 48 hours, `bin`-referenced ones expire with their latest live event, and events plus claimed blobs share one byte budget while unclaimed uploads stay outside it.
+Rabta is a self-hosted backend you run yourself. Your app publishes cryptographically signed events, Rabta stores them in SQLite, streams new ones live over Server-Sent Events (SSE), and stores files as content-addressed blobs. One Rust binary, one SQLite file, one container.
 
-**No accounts. No app schema. No database server. No vendor lock-in.**
+**No accounts. No database server. No app schema. No vendor lock-in.**
 
-It is a deliberately dumb relay: verify a hash and a signature, store opaque bytes, move them around. No event kinds, replaceable-event rules, tag-query language, or NIPs. Clients encrypt and sign; Rabta verifies and stores without ever understanding your data.
+Rabta is deliberately dumb: it verifies a hash and an Ed25519 signature, stores opaque bytes, and never parses your data. Your client owns encryption, signing, and the data model. Rabta only stores and delivers.
 
-**Not a Nostr relay.** It borrows the relay shape — signed events, pubkey identity, an append-only log, a live tail — but not Nostr's wire protocol or NIPs. See [Rabta vs. Nostr relays](#rabta-vs-nostr-relays).
+> **Not a Nostr relay.** Rabta borrows the relay shape — signed events, pubkey identity, live tail — but uses plain HTTP + JSON + SSE, not Nostr wire format or NIPs. See [Rabta vs Nostr](#rabta-vs-nostr).
 
-> **API reference:** [**api.md**](api.md) — every route, the cryptography, wire formats, and blob storage.
->
-> **Jump to:** [publish an event](api.md#post-apiv1events) · [stream over SSE](api.md#get-apiv1eventsstream) · [upload a blob](api.md#put-apiv1blobs)
+**Docs:** [api.md](api.md) — full API reference · OpenAPI at `GET /api/v1/openapi.json` · `GET /` returns a machine-readable route index.
 
-## Why Rabta?
-
-- **Zero-knowledge, dumb by design** — clients sign and encrypt; the node verifies the hash and Ed25519 signature, stores opaque bytes, and never parses your data.
-- **One container, zero ops** — Rust + SQLite; no Postgres, Redis, Kafka, or cloud account.
-- **Blobs in the box** — `PUT /api/v1/blobs` streams raw bytes to disk and returns the SHA-256; an optional signed `bin` list (1–8 hashes) ties blobs to an event. No IPFS, pin ledger, or gateway.
-- **Realtime and retention built in** — SSE with `Last-Event-ID` resume; mandatory TTLs and automatic reclamation of events and blobs.
-- **One storage budget** — `STORAGE_LIMIT` covers envelopes plus blobs claimed by live events; over-budget writes evict events first, largest footprint first, which may release their blobs.
-- **Pin what matters** — `WHITELIST_PUBKEYS` protects chosen owners and the blobs their live events claim from eviction; TTL still applies.
-- **Safe and browser-ready** — size limits, storage watermarks, eviction before the disk fills, permissive CORS, and no proprietary SDK.
-
-## What you can build
-
-| You're building | Rabta gives you |
-| --- | --- |
-| **AI agents** | Shared memory, task queues, append-only logs |
-| **Local-first apps** | Encrypted event streams and content-addressed uploads |
-| **Chat and collaboration** | Rooms, presence, messages, live SSE updates |
-| **Relay-shaped apps** | Signed-event storage without NIPs or WebSockets |
-| **Multiplayer games** | Ephemeral rooms, player state, self-cleaning assets |
-| **IoT and telemetry** | Signed time-series events with automatic retention |
-| **Webhooks and integrations** | A durable inbox/outbox without a broker |
-| **File drop and media** | Raw uploads addressed by SHA-256 |
-
-## Rabta vs. Nostr relays
-
-Rabta is a **simpler alternative to a Nostr relay for app builders**, not a drop-in replacement. It keeps the relay shape and drops the protocol surface.
-
-| | Nostr relay | Rabta |
-| --- | --- | --- |
-| **Transport & auth** | WebSocket with NIP-01 `REQ` / `EVENT` / `EOSE`, optional NIP-42 | Plain HTTP + JSON, SSE for live updates; no auth by design, use a reverse proxy |
-| **Identity** | secp256k1 Schnorr; id = SHA-256 of the event array | Ed25519; id = SHA-256 of the canonical Rabta object |
-| **Events** | Kinds, tags, replaceable/ephemeral events, NIP-09 deletion | Opaque `data`; `collection` + up to 10 `labels`; no kinds or replaceability; TTL/eviction only |
-| **Filtering** | ids, authors, kinds, time, `#tags` | collection, owner, labels, opaque cursor |
-| **Attachments** | URLs embedded in content | Files on Rabta's disk, addressed by SHA-256 |
-| **Replication** | Many-relay network, outbox/gossip | Single node; no cluster mode. Scale the volume or run independent nodes |
-| **Retention** | Relay-defined | Mandatory TTL, 48-hour unclaimed blobs, event-linked blobs, watermark, eviction |
-
-**In practice.** A Nostr client cannot point at Rabta: it accepts no Nostr event JSON and implements no NIPs (not NIP-01, 09, 40, 42, or 50). Interop needs an adapter that translates events into Rabta envelopes. Nostr fits better for open, permissionless many-relay networks, existing Nostr clients, replaceable profiles and contact lists, and relay discovery/outbox routing.
-
-## Quick start
+## Quick Start
 
 ```bash
 docker run -d \
@@ -73,72 +32,130 @@ curl -s http://localhost:3232/api/v1/health
 # {"status":"ok","live_events":0,"live_blobs":0}
 ```
 
-Your backend is live at `http://localhost:3232`. `STORAGE_LIMIT` is one budget for envelopes plus blobs claimed by live events (unclaimed uploads don't count until referenced), clamped at boot to 90% of free disk; add `-e WHITELIST_PUBKEYS=ed25519:<64 hex>,<64 hex>` to pin owners (see [Configuration and limits](#configuration-and-limits)).
+Your backend is live at `http://localhost:3232`. Images ship for **linux/amd64** and **linux/arm64** (`latest`, `YYYY.MM.DD`, `dev`). Prefer Compose? [`compose.yml`](compose.yml) is a ready stack with a 20GB budget and a healthcheck.
 
-Prefer one file? [`compose.yml`](compose.yml) is a ready Portainer stack with its own volume that fixes `STORAGE_LIMIT` at 20GB and passes `WHITELIST_PUBKEYS` through. Images ship for **linux/amd64** and **linux/arm64** (tags `latest`, `YYYY.MM.DD`, `dev`), with static musl binaries and `SHA256SUMS` per release. Rabta serves no HTML — host a static UI anywhere and point it at the node URL.
+```bash
+# Publish a signed event (see api.md for signing code).
+curl -X POST http://localhost:3232/api/v1/events \
+  -H 'content-type: application/json' -d @event.json
+
+# Upload raw bytes — returns the SHA-256.
+curl -X PUT --data-binary @file.bin http://localhost:3232/api/v1/blobs
+
+# Stream live events.
+curl -N 'http://localhost:3232/api/v1/events/stream?collection=chat/room-42'
+```
+
+## What you can build
+
+| You are building | Rabta gives you |
+| --- | --- |
+| **AI agents** | Shared memory, task queues, append-only logs |
+| **Local-first apps** | Encrypted event streams, offline-ready uploads |
+| **Chat & collaboration** | Rooms, presence, messages, live SSE updates |
+| **Multiplayer games** | Ephemeral rooms, player state, self-cleaning assets |
+| **IoT & telemetry** | Signed time-series events with automatic retention |
+| **Webhooks & integrations** | Durable inbox/outbox without a broker |
+| **File drop & media** | Raw uploads addressed by SHA-256 |
+
+## Features
+
+- **Signed events** — Ed25519 + SHA-256 over canonical JSON. Idempotent publish, cursor pagination, fetch by ID.
+- **Realtime streaming** — SSE with `Last-Event-ID` resume, 15-second keepalive, 256-subscriber default cap.
+- **File uploads in the box** — `PUT /api/v1/blobs` streams raw bytes to disk and returns the SHA-256. No IPFS, gateway, or multipart.
+- **Retention built in** — Every event has a mandatory TTL. Unclaimed blobs expire in 48 hours; blob claims expire with their latest live event.
+- **One storage budget** — `STORAGE_LIMIT` covers envelopes + claimed blobs. Over-budget writes evict events first, largest footprint first.
+- **Pin what matters** — `WHITELIST_PUBKEYS` protects chosen keys from eviction (TTL still applies).
+- **Zero ops** — Rust + SQLite + Axum. No Postgres, Redis, Kafka, or cloud account. Permissive CORS, no proprietary SDK.
 
 ## How it works
 
 ```mermaid
 flowchart LR
     app["Your app / AI agent"] -->|"signed events"| node["Rabta node"]
-    node -->|"SSE + event reads"| app
-    app -->|"PUT /api/v1/blobs"| node
-    app -->|"GET /api/v1/blobs/{hash}"| node
+    node -->|"SSE + reads"| app
+    app -->|"PUT /blobs"| node
+    app -->|"GET /blobs/{hash}"| node
     node --> store[("SQLite + blob files")]
 ```
 
-1. **The client owns the data model.** It canonicalizes JSON, hashes it, signs with Ed25519, and optionally encrypts.
-2. **Rabta verifies and stores.** It checks the signature and TTL, then writes an opaque envelope to SQLite.
-3. **Live and blobs.** Subscribers get the event over SSE. `PUT /api/v1/blobs` streams and hashes bytes to a temp file before moving it into its content-addressed slot; `GET /api/v1/blobs/{hash}` streams it back with Range support.
-4. **Retention runs itself.** Unclaimed blobs expire after 48 hours, named blobs with the latest live event referencing them; reads never extend a deadline, and the reaper reclaims expired data.
+1. **Client signs.** Canonicalize JSON, hash with SHA-256, sign with Ed25519, optionally encrypt.
+2. **Rabta verifies and stores.** Check signature + TTL, write the opaque envelope to SQLite.
+3. **Deliver and expire.** New events stream over SSE. Reads never extend deadlines; a reaper cleans up expired events and blobs.
 
-The server never parses your application data, runs your schema, or needs a plaintext copy.
+The server never sees your plaintext, never runs your schema, never needs your keys.
 
-## Developer docs
+## Rabta vs Nostr
 
-Everything else lives in [**api.md**](api.md): the event envelope, canonical JSON and Ed25519 signing, the relay model, all public routes and response shapes, the blob plane, and limits/runtime configuration.
+Rabta is a **simpler alternative to a Nostr relay for app builders**, not a drop-in replacement.
 
-```bash
-# Publish a signed envelope.
-curl -X POST http://localhost:3232/api/v1/events \
-  -H 'content-type: application/json' \
-  --data-binary @event.json
+| | Nostr relay | Rabta |
+| --- | --- | --- |
+| **Transport** | WebSocket (`REQ`/`EVENT`), optional NIP-42 | HTTP + JSON, SSE for live updates, no auth |
+| **Identity** | secp256k1, Schnorr | Ed25519, SHA-256 event ID |
+| **Events** | Kinds, tags, replaceable, NIP-09 deletion | Opaque `data`, `collection` + up to 10 `labels`, TTL only |
+| **Filtering** | ids, authors, kinds, `#tags` | collection, owner, labels, cursor |
+| **Attachments** | URLs in content | Files on Rabta disk, addressed by SHA-256 |
+| **Network** | Many-relay, outbox/gossip | Single node, scale the volume |
 
-# Upload raw bytes; the response carries the SHA-256 and deadline.
-curl -X PUT --data-binary @file.bin http://localhost:3232/api/v1/blobs
+A Nostr client cannot point at Rabta directly — interop needs an adapter. Choose Nostr for permissionless many-relay networks and existing Nostr clients. Choose Rabta when you want one container and no NIPs.
 
-# Fetch it back (Range and ETag supported).
-curl -o file.bin http://localhost:3232/api/v1/blobs/<sha256>
+## Configuration
 
-# Stream live events.
-curl -N 'http://localhost:3232/api/v1/events/stream?collection=chat/room-42'
-```
+Set env vars or `KEY=VALUE` lines in `/data/config.env`. Process environment wins.
 
-The root route returns a machine-readable index of public endpoints; the full OpenAPI 3.1 document is at `GET /api/v1/openapi.json`.
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PORT` | `3232` | HTTP port |
+| `DATA_DIR` | `/data` | SQLite + blob directory |
+| `STORAGE_LIMIT` | `20GB` | Byte budget for envelopes + claimed blobs |
+| `SSE_SUBSCRIBER_CAP` | `256` | Max concurrent SSE clients |
+| `WHITELIST_PUBKEYS` | — | Up to 64 `ed25519:<hex>` keys pinned from eviction |
+| `RUST_LOG` | `info` | Log filter |
 
-## Configuration and limits
+Hard limits: envelopes ≤100KB, TTLs 60s–10 years, single blob ≤1% of the budget, unclaimed blobs 48h. Full table in [api.md](api.md#limits-and-runtime-configuration).
 
-Set environment variables or `KEY=VALUE` lines in `/data/config.env` (process environment wins): `PORT`, `DATA_DIR`, `STORAGE_LIMIT`, `SSE_SUBSCRIBER_CAP`, `WHITELIST_PUBKEYS`, `RUST_LOG`.
+Rabta has no auth. Anyone who can reach the node can publish. For public deployments, put it behind TLS and an authenticated reverse proxy.
 
-`WHITELIST_PUBKEYS` accepts up to 64 Ed25519 keys, bare (`<64 hex>`) or as `ed25519:<64 hex>`, case-insensitive; duplicates collapse and empty entries are ignored. Events owned by those keys, and any blob a live whitelisted event claims, are never evicted for storage pressure — TTLs still apply. Malformed keys or more than 64 unique keys refuse to boot.
+## API
 
-`STORAGE_LIMIT` (default 20 GB) covers envelopes plus every blob claimed by a live event; a 48-hour unclaimed upload stays outside it until claimed and only faces the free-disk floor. It is clamped to 90% of free disk at boot, `0` refuses to boot, and blob routes can't be disabled. A single blob may be at most 1% of the budget; envelopes are capped at 100 KB, TTLs range from 60 seconds to 10 years, unclaimed blobs live 48 hours, and claimed blobs expire with their latest live event.
+| Action | Route |
+| --- | --- |
+| Publish | `POST /api/v1/events` |
+| List | `GET /api/v1/events?collection=&label=&owner=&limit=&cursor=` |
+| Fetch | `GET /api/v1/events/{id}` |
+| Stream | `GET /api/v1/events/stream` (SSE) |
+| Upload | `PUT /api/v1/blobs` |
+| Download | `GET /api/v1/blobs/{hash}` |
 
-If pinned data alone fills the budget, new writes get `507 at_watermark` rather than deleting pinned rows; `/api/v1/stats` reports `whitelist_keys`, `whitelist_event_bytes`, and `whitelist_blob_bytes` so you can see it coming.
+Full wire format, envelope fields, signing rules, blob plane, and client examples: [**api.md**](api.md).
 
-There is no IPFS, Kubo, CID, `STORAGE_MAX`, `.bin`, `.dir`, multipart upload, or blob listing. Identity is always the lowercase hex SHA-256 of the raw body. Full table: [Limits and runtime configuration](api.md#limits-and-runtime-configuration).
+## FAQ
+
+**Is Rabta a database?**
+No. Rabta is an event relay. It stores opaque, signed envelopes in SQLite. Your app decides the schema inside `data`.
+
+**Do I need Postgres, Redis, or IPFS?**
+No. One container, one SQLite file, blobs on local disk. That's the whole stack.
+
+**How does authentication work?**
+It doesn't — by design. Identity is cryptographic (Ed25519). For access control, add an authenticated reverse proxy.
+
+**Can I use Rabta with my Nostr client?**
+No. Rabta does not implement Nostr wire format or any NIP. You would need an adapter that translates Nostr events into Rabta envelopes.
+
+**What happens when storage fills up?**
+Events are evicted first (largest footprint first), then claimed blobs. Pinned (`WHITELIST_PUBKEYS`) data is never evicted; writes get `507 at_watermark` instead. See `/api/v1/stats`.
 
 ## Privacy model
 
-Rabta is zero-knowledge in practice: no accounts, no application logic, no plaintext. It does see metadata — public key, collection, labels, blob-reference hashes, sizes, and timing — and blob identity reveals its content hash, so encrypt client-side when that matters. For a hardened deployment, put the node behind TLS and an authenticated reverse proxy.
+Rabta is zero-knowledge in practice: no accounts, no app logic, no plaintext. It does see metadata — pubkey, collection, labels, sizes, timing — so encrypt client-side when that matters.
 
 ## Project status
 
-Rabta is under active development (`0.0.1-dev`). The API is deliberately small and relay-shaped, not Nostr-compatible. Issues and pull requests are welcome.
+Rabta is under active development (`0.0.1-dev`). The API is deliberately small and relay-shaped, not Nostr-compatible. Issues and PRs are welcome.
 
 If Rabta saves you from building a backend, a ⭐ helps other builders discover it.
 
-## Keywords
-
-Self-hosted backend · Rust backend · SQLite backend · event store · content-addressed storage · realtime API · Server-Sent Events · SSE · local-first apps · offline-first apps · Ed25519 · end-to-end encryption · zero-knowledge backend · privacy-first · AI agent memory · Nostr alternative · dumb relay · Docker · Axum · backend as a service
+---
+*Self-hosted backend · Rust · SQLite · signed events · SSE realtime API · content-addressed file storage · Ed25519 · zero-knowledge · AI agent memory · Nostr alternative · Docker*
