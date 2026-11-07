@@ -8,7 +8,7 @@ New to Rabta? Start with the [README](README.md) for the one-container quick sta
 
 ## Contents
 
-- [Relay model, not Nostr](#relay-model-not-nostr)
+- [Relay model](#relay-model)
 - [Conventions](#conventions)
 - [Errors](#errors)
 - [Cryptography and the event envelope](#cryptography-and-the-event-envelope)
@@ -29,16 +29,14 @@ New to Rabta? Start with the [README](README.md) for the one-container quick sta
 - [Limits and runtime configuration](#limits-and-runtime-configuration)
 - [Client examples](#client-examples)
 
-## Relay model, not Nostr
+## Relay model
 
-Rabta has the shape of a relay — signed immutable events, a pubkey identity, an append-only sequence, live delivery — but it is not a Nostr relay and does not implement NIPs.
+Rabta is an event relay — signed immutable events, a pubkey identity, an append-only sequence, live delivery.
 
-- **Transport:** HTTP + JSON + SSE, not WebSocket `REQ` / `EVENT` / `EOSE`.
-- **Signatures:** Ed25519 over a canonical Rabta object, not secp256k1 Schnorr over a Nostr event array.
-- **Model:** no `kind`, no `tags`, no replaceable or ephemeral events, no NIP-09 deletion, no NIP-42 auth, no NIP-50 search.
+- **Transport:** HTTP + JSON + SSE.
+- **Signatures:** Ed25519 over a canonical Rabta object.
+- **Model:** opaque `data`, `collection` plus up to 10 `labels`, mandatory TTL.
 - **Attachments:** raw uploads are stored on the node's own disk, addressed by SHA-256. An unclaimed blob lives 48 hours; a blob named in a live event's `bin` expires with that event.
-
-A Nostr client cannot talk to Rabta without an adapter. See [Rabta vs. Nostr relays](README.md#rabta-vs-nostr-relays) for the side-by-side comparison.
 
 ## Conventions
 
@@ -53,7 +51,7 @@ A Nostr client cannot talk to Rabta without an adapter. See [Rabta vs. Nostr rel
 | Authentication | None. Every route is unauthenticated. |
 | CORS | Permissive (`Access-Control-Allow-Origin: *`, all methods/headers). |
 | Versioning | No URL version prefix. |
-| Relay compatibility | Not Nostr-compatible; no NIPs are implemented. See [Relay model, not Nostr](#relay-model-not-nostr). |
+| Event delivery | Signed events over HTTP + JSON + SSE. See [Relay model](#relay-model). |
 | HTML | None. A UI is a separate static app that calls the node. |
 
 Because there is no authentication, anyone who can reach the node can publish events and upload blobs. The `owner` field is a cryptographic identity, not an access-control check. Put the node behind TLS and an authenticating reverse proxy if it is exposed to the internet.
@@ -101,7 +99,7 @@ The HTTP status and `code` identify the class of failure:
 4. The signed digest is computed over **canonical JSON** with sorted keys and compact separators.
 5. Clients may encrypt `data` and blob bytes before upload. The server never needs plaintext.
 
-> **Not a Nostr event.** There is no `kind`, `tags`, or `content`, and the signature is Ed25519 over the canonical object below, not secp256k1 Schnorr over a Nostr array. Rabta does not implement NIP-01, NIP-09, NIP-40, NIP-42, or NIP-50. See [Relay model, not Nostr](#relay-model-not-nostr).
+> **Rabta event envelope.** The signature is Ed25519 over the canonical object below. See [Relay model](#relay-model).
 
 ### What the server can see
 

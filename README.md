@@ -13,7 +13,7 @@ Rabta is a self-hosted backend you run yourself. Your app publishes cryptographi
 
 Rabta is deliberately dumb: it verifies a hash and an Ed25519 signature, stores opaque bytes, and never parses your data. Your client owns encryption, signing, and the data model. Rabta only stores and delivers.
 
-> **Not a Nostr relay.** Rabta borrows the relay shape — signed events, pubkey identity, live tail — but uses plain HTTP + JSON + SSE, not Nostr wire format or NIPs. See [Rabta vs Nostr](#rabta-vs-nostr).
+> **Plain HTTP + JSON + SSE.** Rabta delivers signed events with Ed25519 identity and live-tail streaming through a small, self-contained API.
 
 **Docs:** [api.md](api.md) — full API reference · OpenAPI at `GET /api/v1/openapi.json` · `GET /` returns a machine-readable route index.
 
@@ -85,21 +85,6 @@ flowchart LR
 
 The server never sees your plaintext, never runs your schema, never needs your keys.
 
-## Rabta vs Nostr
-
-Rabta is a **simpler alternative to a Nostr relay for app builders**, not a drop-in replacement.
-
-| | Nostr relay | Rabta |
-| --- | --- | --- |
-| **Transport** | WebSocket (`REQ`/`EVENT`), optional NIP-42 | HTTP + JSON, SSE for live updates, no auth |
-| **Identity** | secp256k1, Schnorr | Ed25519, SHA-256 event ID |
-| **Events** | Kinds, tags, replaceable, NIP-09 deletion | Opaque `data`, `collection` + up to 10 `labels`, TTL only |
-| **Filtering** | ids, authors, kinds, `#tags` | collection, owner, labels, cursor |
-| **Attachments** | URLs in content | Files on Rabta disk, addressed by SHA-256 |
-| **Network** | Many-relay, outbox/gossip | Single node, scale the volume |
-
-A Nostr client cannot point at Rabta directly — interop needs an adapter. Choose Nostr for permissionless many-relay networks and existing Nostr clients. Choose Rabta when you want one container and no NIPs.
-
 ## Configuration
 
 Set env vars or `KEY=VALUE` lines in `/data/config.env`. Process environment wins.
@@ -141,9 +126,6 @@ No. One container, one SQLite file, blobs on local disk. That's the whole stack.
 **How does authentication work?**
 It doesn't — by design. Identity is cryptographic (Ed25519). For access control, add an authenticated reverse proxy.
 
-**Can I use Rabta with my Nostr client?**
-No. Rabta does not implement Nostr wire format or any NIP. You would need an adapter that translates Nostr events into Rabta envelopes.
-
 **What happens when storage fills up?**
 Events are evicted first (largest footprint first), then claimed blobs. Pinned (`WHITELIST_PUBKEYS`) data is never evicted; writes get `507 at_watermark` instead. See `/api/v1/stats`.
 
@@ -153,9 +135,9 @@ Rabta is zero-knowledge in practice: no accounts, no app logic, no plaintext. It
 
 ## Project status
 
-Rabta is under active development (`0.0.1-dev`). The API is deliberately small and relay-shaped, not Nostr-compatible. Issues and PRs are welcome.
+Rabta is under active development (`0.0.1-dev`). The API is deliberately small and focused. Issues and PRs are welcome.
 
 If Rabta saves you from building a backend, a ⭐ helps other builders discover it.
 
 ---
-*Self-hosted backend · Rust · SQLite · signed events · SSE realtime API · content-addressed file storage · Ed25519 · zero-knowledge · AI agent memory · Nostr alternative · Docker*
+*Self-hosted backend · Rust · SQLite · signed events · SSE realtime API · content-addressed file storage · Ed25519 · zero-knowledge · AI agent memory · Docker*
