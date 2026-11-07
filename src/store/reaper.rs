@@ -454,7 +454,7 @@ pub fn event_pressure_check(
     Err(crate::error::ApiError::at_watermark())
 }
 
-/// Admission for a blob write. Unclaimed uploads are free (48-hour window);
+/// Admission for a blob write. Unclaimed uploads are free (6-hour window);
 /// claimed uploads are charged and may trigger combined eviction.
 pub fn blob_pressure_check(
     c: &Connection,
@@ -510,7 +510,7 @@ pub fn blob_pressure_check(
 }
 
 /// Layer 1: expiry sweep — events by `expires_at` (≤ now), then blobs by
-/// their derived deadline (event claim or the 48-hour unclaimed window).
+/// their derived deadline (event claim or the 6-hour unclaimed window).
 pub fn sweep_once(c: &Connection, cfg: &Config) -> rusqlite::Result<EvictionStats> {
     let mut out = EvictionStats::default();
     let now_n = now();

@@ -718,7 +718,7 @@ mod tests {
         delete_events(&c, &[long.id]).unwrap();
         assert_eq!(expiry(&c), stored_at + 5_000);
 
-        // With no live references the 48-hour unclaimed window applies again.
+        // With no live references the 6-hour unclaimed window applies again.
         delete_events(&c, &[short.id]).unwrap();
         assert_eq!(expiry(&c), unclaimed);
         let refs: i64 = c

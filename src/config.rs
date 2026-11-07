@@ -22,7 +22,7 @@ pub struct Config {
     pub port: u16,
     pub data_dir: PathBuf,
     /// Effective combined budget in bytes: events plus blobs claimed by a
-    /// live event. Unclaimed blobs are outside it until their 48-hour expiry.
+    /// live event. Unclaimed blobs are outside it until their 6-hour expiry.
     pub store: u64,
     /// Unclamped value the operator asked for (diagnostics only).
     pub store_configured: u64,

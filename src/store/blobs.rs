@@ -365,7 +365,7 @@ pub fn blob_is_claimed(c: &rusqlite::Connection, hash: &[u8; 32]) -> rusqlite::R
 ///
 /// A duplicate only refreshes access metadata and re-derives expiry from the
 /// current event references; it can never extend an unclaimed blob past its
-/// 48-hour window.
+/// 6-hour window.
 pub fn insert_blob_row(
     c: &rusqlite::Connection,
     hash: &[u8; 32],
@@ -388,7 +388,7 @@ pub fn insert_blob_row(
         return Ok(BlobInsertResult::Deduped);
     }
 
-    // Unclaimed uploads are outside the budget: they live in the 48-hour
+    // Unclaimed uploads are outside the budget: they live in the 6-hour
     // window and only the disk free floor applies. A blob already claimed by
     // an event is charged and must fit the combined budget.
     let claimed = blob_is_claimed(c, hash)?;
@@ -601,7 +601,7 @@ pub fn blob_pass_with(
 
 /// Pressure-only reclaim for the combined budget. Only blobs claimed by a
 /// live event are charged, so only they are candidates here. Unclaimed blobs
-/// expire through the 48-hour sweep instead.
+/// expire through the 6-hour sweep instead.
 ///
 /// A blob claimed by any live event owned by a `WHITELIST_PUBKEYS` entry is
 /// never a victim, even if an unprotected event also references it.
@@ -707,7 +707,7 @@ pub fn blob_pressure_pass_with(
 
 /// Re-derive one blob's deadline from its live event references.
 /// Claimed blobs expire with the latest referencing event; unclaimed blobs
-/// fall back to 48 hours after their first upload. Call after any change to
+/// fall back to 6 hours after their first upload. Call after any change to
 /// `blob_refs`.
 pub fn refresh_blob_expiry(c: &rusqlite::Connection, hash: &[u8; 32]) -> rusqlite::Result<()> {
     c.execute(
@@ -944,7 +944,7 @@ mod tests {
 
         seed_event(&db, [9u8; 32], 9).await;
         // Claim the (not yet uploaded) hash so the install is charged to the
-        // combined budget instead of the free 48-hour window.
+        // combined budget instead of the free 6-hour window.
         db.write(|c: &rusqlite::Connection| {
             c.execute(
                 "INSERT INTO blob_refs(hash, event_id) VALUES (?1, ?2)",
@@ -1077,7 +1077,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unclaimed_blob_expires_after_48_hours() {
+    async fn unclaimed_blob_expires_after_six_hours() {
         let dir = temp_dir("blob-lease");
         init_dirs(&dir).unwrap();
         let db = Db::open(&dir);
@@ -1103,7 +1103,7 @@ mod tests {
         assert_eq!(
             expires_at,
             stored_at + crate::db::BLOB_UNCLAIMED_TTL_SECONDS,
-            "an unclaimed blob did not get the 48-hour window"
+            "an unclaimed blob did not get the 6-hour window"
         );
 
         let dir2 = dir.clone();
@@ -1226,7 +1226,7 @@ mod tests {
         assert_eq!(
             stored,
             stored_at + crate::db::BLOB_UNCLAIMED_TTL_SECONDS,
-            "re-upload extended an unclaimed blob past 48 hours"
+            "re-upload extended an unclaimed blob past 6 hours"
         );
 
         drop(db);

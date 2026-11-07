@@ -38,7 +38,7 @@ Rabta is an event relay — signed events, a pubkey identity, a monotonic sequen
 - **Signatures:** Ed25519 over a canonical Rabta object.
 - **Model:** opaque `data`, `collection` plus up to 10 `labels`, mandatory TTL.
 - **Deletion:** the owner key can hard-delete its events with a signed request. Live SSE subscribers receive a delete notice.
-- **Attachments:** raw uploads are stored on the node's own disk, addressed by SHA-256. An unclaimed blob lives 48 hours; a blob named in a live event's `bin` expires with that event.
+- **Attachments:** raw uploads are stored on the node's own disk, addressed by SHA-256. An unclaimed blob lives 6 hours; a blob named in a live event's `bin` expires with that event.
 
 ## Conventions
 
@@ -215,7 +215,8 @@ Verification order inside the node: body cap → JSON shape → TTL window → c
 - Each entry is a SHA-256 hash of a blob uploaded through `PUT /api/v1/blobs`.
 - The server validates shape only. It never checks existence.
 - A blob referenced by a live event expires with the **latest** expiry among its live referencing events. Multiple events can claim the same blob; the longest-lived one wins.
-- A blob with no live references is unclaimed and expires **48 hours after its first upload**. Reads and re-uploads do not extend that window.
+- A blob with no live references is unclaimed and expires **6 hours after its first upload**. Reads and re-uploads do not extend that window.
+- The window is short on purpose: upload and the event that claims the blob normally happen in one online session. If it lapses, re-upload the bytes before publishing the event.
 - Only claimed blobs count toward `STORAGE_LIMIT`. An unclaimed upload is outside the budget until an event references it.
 - A dangling reference is valid. Storage pressure can still evict a claimed blob early, exactly as it can evict an unexpired event; events are evicted before claimed blobs. The exception is a blob claimed by a live event from a `WHITELIST_PUBKEYS` owner, which is never a pressure victim.
 - `bin` is not indexed or filterable; there is no `GET /api/v1/events?bin=...`. The server does keep an internal refs table to calculate retention.
@@ -611,7 +612,7 @@ The digest input is canonical JSON — sorted keys, compact separators, no white
 - Missing, expired, or already-deleted targets go to `not_found`; the request still succeeds. A retry is therefore idempotent.
 - All-or-nothing: if any live target is owned by another key, the whole request returns `403 forbidden` and nothing is deleted.
 - Deletion is immediate and hard: the event row, its labels, and its blob references are removed in one transaction.
-- Blobs that lose their last live reference become unclaimed. They expire 48 hours after their original upload — a deadline that may already have passed — and are then reclaimed by the reaper. Reads do not extend it.
+- Blobs that lose their last live reference become unclaimed. They expire 6 hours after their original upload — a deadline that may already have passed — and are then reclaimed by the reaper. Reads do not extend it.
 - Live SSE subscribers with matching filters receive the `event: delete` frame described above.
 
 **Errors**
@@ -654,7 +655,7 @@ curl -X PUT --data-binary @file.bin http://localhost:3232/api/v1/blobs
 }
 ```
 
-Identity is the lowercase hex SHA-256 of the raw body. Re-uploading the same bytes deduplicates: no bytes are added, access metadata is refreshed, and the response is `200 OK`. Re-uploading never extends an unclaimed blob past 48 hours.
+Identity is the lowercase hex SHA-256 of the raw body. Re-uploading the same bytes deduplicates: no bytes are added, access metadata is refreshed, and the response is `200 OK`. Re-uploading never extends an unclaimed blob past 6 hours.
 
 ### `GET /api/v1/blobs/{hash}`
 
@@ -678,7 +679,7 @@ Response headers:
 - `If-None-Match` with the blob's ETag returns `304 Not Modified`.
 - A successful `200`, `206`, or `304` records the access. It never extends the blob's deadline; access tracking is write-throttled to at most once per hour per blob.
 
-A blob's deadline is derived, not stored as a sliding lease. An unclaimed blob expires **48 hours after its first upload**; a blob named in one or more live events expires when the latest of those events expires. Reads never change the deadline.
+A blob's deadline is derived, not stored as a sliding lease. An unclaimed blob expires **6 hours after its first upload**; a blob named in one or more live events expires when the latest of those events expires. Reads never change the deadline.
 
 ### `HEAD /api/v1/blobs/{hash}`
 
@@ -693,10 +694,10 @@ Blobs are stored locally:
 | `PUT /api/v1/blobs` | Streams the body to a temp file, hashes it, installs it at `/data/blobs/ab/<hash>`, and returns the hash. |
 | Same bytes uploaded again | Deduplicated; no new bytes; access metadata refreshed; deadline unchanged. |
 | Read | Serves bytes with Range/ETag and records the access (throttled). Deadline unchanged. |
-| Event deleted | The event's labels and `blob_refs` rows are removed. A blob with no remaining live reference becomes unclaimed and expires 48 hours after its original upload — a deadline that may already have passed. |
+| Event deleted | The event's labels and `blob_refs` rows are removed. A blob with no remaining live reference becomes unclaimed and expires 6 hours after its original upload — a deadline that may already have passed. |
 | Disk pressure | Events leave first, largest total footprint first (envelope plus blobs only that event claims), which may unclaim their blobs; then claimed blobs, down to the 85% target. Unclaimed blobs are not pressure-evicted. |
 | Pinned claim | A blob referenced by any live event from a `WHITELIST_PUBKEYS` owner is never a pressure victim, even if an unprotected event also references it. |
-| Retention | Unclaimed: 48 hours from upload. Claimed: latest expiry of the live events listing it. Reclaimed by the reaper. |
+| Retention | Unclaimed: 6 hours from upload. Claimed: latest expiry of the live events listing it. Reclaimed by the reaper. |
 
 `STORAGE_LIMIT` is a single byte budget with an admission line at 90% and an eviction target at 85%. It counts event envelopes plus blobs claimed by a live event; unclaimed blobs are outside it until an event references them.
 
@@ -721,7 +722,7 @@ If the configured budget exceeds 90% of free disk at boot, it is clamped to 90%.
 | Single blob | 1% of effective `STORAGE_LIMIT` |
 | Concurrent blob uploads | 8 |
 | Upload stall timeout | 30 seconds between chunks |
-| Blob retention | Unclaimed: 48 hours from upload. Claimed: latest referencing event expiry. Reads never extend it. |
+| Blob retention | Unclaimed: 6 hours from upload. Claimed: latest referencing event expiry. Reads never extend it. |
 | SSE subscribers | 256 by default |
 | Reaper interval | 300 seconds |
 | Whitelisted owners | 64 keys; exempt from pressure eviction, still TTL-expired |
@@ -748,7 +749,7 @@ Sizes accept `20GB`, `512MiB`, `52428800`, and similar. Derived values:
 - The combined budget has an admission watermark at 90% and an eviction target at 85%.
 - If `STORAGE_LIMIT` exceeds 90% of free disk at boot, it is clamped to 90%.
 - `STORAGE_LIMIT=0` refuses to boot.
-- Unclaimed blob uploads do not count toward `STORAGE_LIMIT` until a live event references them; they expire 48 hours after upload.
+- Unclaimed blob uploads do not count toward `STORAGE_LIMIT` until a live event references them; they expire 6 hours after upload.
 - A single blob may be at most 1% of the effective `STORAGE_LIMIT`.
 - There is no `STORAGE_MAX` or `IPFS` variable.
 - Pinned owners above the watermark cause new writes to be refused (`507 at_watermark`) rather than evicting pinned rows. `/api/v1/stats` reports the pinned byte totals.

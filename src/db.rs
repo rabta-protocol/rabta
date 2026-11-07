@@ -146,10 +146,10 @@ pub const MAX_DELETE_BODY: usize = 16_384;
 pub const MAX_BIN_REFS: usize = 8;
 pub const MAX_TTL_SECONDS: i64 = 10 * 365 * 86400; // max_age: 10 years
 pub const MIN_TTL_SECONDS: i64 = 60; // expires_at must be > created_at + 60s
-/// An unclaimed blob lives 48 hours from its first upload. Reads do not
+/// An unclaimed blob lives 6 hours from its first upload. Reads do not
 /// extend it; claiming it from an event replaces this with the event's
 /// `expires_at`.
-pub const BLOB_UNCLAIMED_TTL_SECONDS: i64 = 48 * 3600;
+pub const BLOB_UNCLAIMED_TTL_SECONDS: i64 = 6 * 3600;
 /// Access tracking is write-throttled: a read only touches the row when the
 /// previous touch is at least this old, bounding writer load.
 pub const BLOB_REFRESH_SECONDS: i64 = 3600;
@@ -340,7 +340,7 @@ CREATE TABLE IF NOT EXISTS blobs (
   hash      BLOB(32) PRIMARY KEY,     -- raw sha256 of the bytes
   size      INTEGER NOT NULL,
   stored_at INTEGER NOT NULL,         -- unix seconds; never resets
-  expires_at INTEGER NOT NULL,        -- claimed: max event expiry; else stored_at + 48h
+  expires_at INTEGER NOT NULL,        -- claimed: max event expiry; else stored_at + 6h
   last_access_at INTEGER NOT NULL DEFAULT 0, -- 0 = never read since upload
   access_count   INTEGER NOT NULL DEFAULT 0,
   state     TEXT    NOT NULL DEFAULT 'live'
