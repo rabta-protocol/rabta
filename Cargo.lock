@@ -597,7 +597,7 @@ dependencies = [
 
 [[package]]
 name = "rabta"
-version = "0.0.1-dev"
+version = "0.0.1"
 dependencies = [
  "axum",
  "base64",
