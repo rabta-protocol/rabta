@@ -32,7 +32,7 @@ curl -s http://localhost:3232/api/v1/health
 # {"status":"ok","live_events":0,"live_blobs":0}
 ```
 
-Your backend is live at `http://localhost:3232`. Images ship for **linux/amd64** and **linux/arm64** (`latest`, `YYYY.MM.DD`, `dev`). Prefer Compose? [`compose.yml`](compose.yml) is a ready stack with a 20GB budget and a healthcheck.
+Your backend is live at `http://localhost:3232`. Images ship for **linux/amd64** and **linux/arm64** (`latest`, `vX.Y.Z`, `dev`). Prefer Compose? [`compose.yml`](compose.yml) is a ready stack with a 20GB budget and a healthcheck.
 
 ```bash
 # Publish a signed event (see api.md for signing code).
