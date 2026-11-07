@@ -1,7 +1,4 @@
-use std::sync::OnceLock;
-
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use regex::Regex;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -39,14 +36,18 @@ fn is_blob_hash(s: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-fn collection_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^[a-z0-9/_-]{1,32}$").unwrap())
+fn valid_collection(s: &str) -> bool {
+    (1..=32).contains(&s.len())
+        && s.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'/' | b'_' | b'-')
+        })
 }
 
-fn label_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^[A-Za-z0-9:_\.\-\+\/]{1,64}$").unwrap())
+fn valid_label(s: &str) -> bool {
+    (1..=64).contains(&s.len())
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'.' | b'-' | b'+' | b'/')
+        })
 }
 
 /// Full publish-time validation of one envelope:
@@ -94,7 +95,7 @@ pub fn parse_and_verify(body: &[u8], now: i64) -> ApiResult<ParsedEvent> {
     let owner_canon = format!("ed25519:{}", owner_hex_part.to_ascii_lowercase());
 
     let collection = get_str(obj, "collection")
-        .filter(|c| collection_re().is_match(c))
+        .filter(|c| valid_collection(c))
         .ok_or(ApiError::bad_collection())?;
 
     let created_at = obj
@@ -125,7 +126,7 @@ pub fn parse_and_verify(body: &[u8], now: i64) -> ApiResult<ParsedEvent> {
     let mut labels: Vec<String> = Vec::with_capacity(labels_raw.len());
     for l in labels_raw {
         match l.as_str() {
-            Some(s) if label_re().is_match(s) => labels.push(s.to_string()),
+            Some(s) if valid_label(s) => labels.push(s.to_string()),
             Some(s) => {
                 return Err(ApiError::bad_label(format!(
                     "label `{s}` does not match the label shape rule"
