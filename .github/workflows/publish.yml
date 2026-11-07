@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag, vX.Y.Z. Defaults to v<version> from Cargo.toml."
+        description: "Release tag, X.Y.Z. Defaults to the version in Cargo.toml."
         required: false
         type: string
 
@@ -45,9 +45,9 @@ jobs:
             echo "::error::could not read version from Cargo.toml"
             exit 1
           fi
-          TAG="${INPUT_TAG:-v$VERSION}"
-          if ! printf '%s' "$TAG" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
-            echo "::error::tag '$TAG' must look like vX.Y.Z (optional -prerelease suffix)"
+          TAG="${INPUT_TAG:-$VERSION}"
+          if ! printf '%s' "$TAG" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::tag '$TAG' must look like X.Y.Z (optional -prerelease suffix)"
             exit 1
           fi
           if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
