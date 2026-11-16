@@ -2,9 +2,10 @@
 name = "rabta"
 version = "0.0.1"
 edition = "2024"
+description = "The self-healing sync relay for local-first apps and peer meshes."
 repository = "https://github.com/rabta-protocol/rabta"
-homepage = "https://github.com/rabta-protocol/rabta"
-keywords = ["self-hosted", "decentralized", "sync", "relay", "sqlite"]
+homepage = "https://rabta.space/"
+keywords = ["local-first", "self-hosted", "p2p", "sync", "sqlite"]
 categories = ["web-programming::http-server", "database-implementations"]
 
 [dependencies]
