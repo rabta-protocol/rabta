@@ -1135,12 +1135,11 @@ mod tests {
         let dir = temp_dir("reaper-policy-collection");
         let db = Db::open(&dir);
         let mut cfg = test_cfg(&dir);
-        cfg.policy =
-            Rules::test_rules(vec![crate::store::policy::PolicyRule::test_rule(
-                Vec::new(),
-                vec!["arch*".into()],
-                Vec::new(),
-            )]);
+        cfg.policy = Rules::test_rules(vec![crate::store::policy::PolicyRule::test_rule(
+            Vec::new(),
+            vec!["arch*".into()],
+            Vec::new(),
+        )]);
 
         let pinned = [0x55u8; 32];
         db.write(move |c| -> rusqlite::Result<()> {
@@ -1184,12 +1183,11 @@ mod tests {
         let dir = temp_dir("reaper-policy-label");
         let db = Db::open(&dir);
         let mut cfg = test_cfg(&dir);
-        cfg.policy =
-            Rules::test_rules(vec![crate::store::policy::PolicyRule::test_rule(
-                Vec::new(),
-                Vec::new(),
-                vec!["keep*".into()],
-            )]);
+        cfg.policy = Rules::test_rules(vec![crate::store::policy::PolicyRule::test_rule(
+            Vec::new(),
+            Vec::new(),
+            vec!["keep*".into()],
+        )]);
 
         db.write(move |c| -> rusqlite::Result<()> {
             insert_event_in(c, 1, [0u8; 32], "c", 30, 9_999_999_999, &[]);

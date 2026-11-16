@@ -56,9 +56,7 @@ async fn put_inner(n: AppState, req: Request<Body>) -> ApiResult<Response> {
         .and_then(|v| v.parse::<u64>().ok())
         && cl > n.cfg.max_single_blob
     {
-        return Err(ApiError::too_large(
-            "single blob exceeds 0.1% of STORAGE",
-        ));
+        return Err(ApiError::too_large("single blob exceeds 0.1% of STORAGE"));
     }
 
     let staged = stage_body(&n, req.into_body()).await?;

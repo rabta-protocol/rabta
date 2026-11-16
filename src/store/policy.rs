@@ -432,11 +432,7 @@ mod tests {
 
     #[test]
     fn empty_rules_array_and_wildcard_everything() {
-        assert!(
-            PolicyRules::parse(r#"{"rules":[]}"#)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(PolicyRules::parse(r#"{"rules":[]}"#).unwrap().is_empty());
         let everything = PolicyRules::parse(r#"{"rules":[{},{},{}]}"#).unwrap();
         assert_eq!(everything.rule_count(), 3);
         assert!(everything.rule_clause("e", false, 1).is_some());

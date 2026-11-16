@@ -143,8 +143,7 @@ impl Config {
         let store = effective_storage;
         let max_single_blob = max_single_blob_for(effective_storage);
 
-        let policy =
-            PolicyRules::resolve(var_or_err("POLICY", &env_file_settings), "POLICY");
+        let policy = PolicyRules::resolve(var_or_err("POLICY", &env_file_settings), "POLICY");
         let sync_nodes = resolve_sync_nodes(var_or_err("SYNC", &env_file_settings));
 
         let battery_regen_per_sec = match var_or_err("REGEN", &env_file_settings) {
